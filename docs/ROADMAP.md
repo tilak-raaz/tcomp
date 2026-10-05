@@ -21,7 +21,7 @@ tcomp is built in milestones. Each one ends with working code, passing tests, up
 ## Progress
 
 - [x] M0 Setup
-- [ ] M1 Bit I/O
+- [x] M1 Bit I/O
 - [ ] M2 Huffman
 - [ ] M3 LZ77
 - [ ] M4 LZ77 + Huffman

@@ -2,7 +2,7 @@
 
 This document specifies every byte of a `.tcmp` file. It should be precise enough to write a compatible decoder without reading tcomp's source code.
 
-Conventions: offsets and sizes are in bytes. Multi-byte integers will be little-endian (none exist yet in version 0).
+Conventions: offsets and sizes are in bytes. Multi-byte integers will be little-endian (none exist yet in version 0). Bit-packed data (from M2) is **MSB-first**: the first bit of the stream is the most significant bit (0x80) of the first byte, and each multi-bit field is stored from its most significant bit down. A bitstream ends with 0 bits padding it to a whole byte.
 
 ## Version 0 (current, M0)
 
