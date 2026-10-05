@@ -1,0 +1,66 @@
+# tcomp
+
+A lossless file compressor written from scratch in C11.
+
+tcomp is being built milestone by milestone toward an LZ77 + canonical Huffman compressor (the same family as gzip/DEFLATE) with its own checksummed `.tcmp` file format, streaming I/O, multithreaded block compression, a benchmark suite and fuzz testing. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and current status.
+
+> **Status: M0 (project setup).** The CLI, file container, tests and CI are in place. The only method so far is `STORE` (no compression), which lets the whole pipeline be tested before real compression arrives in M2.
+
+## Build
+
+Requirements: a C11 compiler (gcc or clang), GNU make, and a POSIX system. Development and CI use Linux.
+
+```sh
+make                  # debug build with AddressSanitizer + UBSan -> build/debug/tcomp
+make BUILD=release    # optimised build -> build/release/tcomp
+make test             # unit tests + roundtrip tests
+make CC=clang test    # same with clang
+```
+
+On Ubuntu/Debian, install everything with:
+
+```sh
+sudo apt install build-essential clang clang-format gdb valgrind
+sudo apt install "libclang-rt-$(clang -dumpversion | cut -d. -f1)-dev"   # sanitizers for clang
+```
+
+## Usage
+
+```sh
+tcomp compress   input.txt  output.tcmp
+tcomp decompress output.tcmp restored.txt
+tcomp --version
+
+# stdin/stdout with -
+cat input.txt | tcomp compress - - | tcomp decompress - - > restored.txt
+```
+
+Exit codes: `0` success, `1` runtime error (bad input, I/O failure), `2` usage error. A failed decompression never leaves a partial output file behind.
+
+## Project layout
+
+```
+include/tcomp/   public headers; every function documented
+src/             library code; main.c is the CLI and the only file that prints or exits
+tests/unit/      C unit tests (tiny framework in test.h)
+tests/           roundtrip.sh: end-to-end CLI tests on edge-case files
+docs/            roadmap, format spec, design, benchmarks, decision notes
+```
+
+## Documentation
+
+| Document | What it covers |
+| --- | --- |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Milestones M0–M10 and progress |
+| [docs/FORMAT.md](docs/FORMAT.md) | Byte-level specification of `.tcmp` files |
+| [docs/DESIGN.md](docs/DESIGN.md) | Architecture, modules, conventions |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Methodology and results (from M6) |
+| [docs/decisions/](docs/decisions/) | Short notes explaining each significant design decision |
+
+## Benchmarks
+
+Coming in M6, measured on the Canterbury and Silesia corpora against gzip, bzip2, xz and zstd.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -1,0 +1,15 @@
+# Build output (make clean removes it)
+build/
+
+# Benchmark corpora are downloaded, never committed
+bench/corpus/
+
+# Editor and OS clutter
+.vscode/
+*.swp
+.DS_Store
+
+# Stray outputs from manual testing
+*.tcmp
+*.restored
+core

@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.cc }}, ${{ matrix.build }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+        build: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang sanitizer runtime
+        if: matrix.cc == 'clang'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "libclang-rt-$(clang -dumpversion | cut -d. -f1)-dev"
+      - name: Build and test
+        run: make CC=${{ matrix.cc }} BUILD=${{ matrix.build }} test
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: make format-check
