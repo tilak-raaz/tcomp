@@ -2,23 +2,30 @@
  * @file test.h
  * @brief A deliberately tiny unit-test framework. No dependencies.
  *
- * Usage:
+ * Each module gets its own file, tests/unit/test_<module>.c, containing
+ * static TEST functions and one public suite function that RUNs them:
+ *
  *   TEST(test_something) { CHECK(1 + 1 == 2); }
- *   int main(void) { RUN(test_something); return test_summary(); }
+ *   void suite_example(void) { RUN(test_something); }
+ *
+ * Declare the suite below and call it from main() in tests/unit/main.c.
  *
  * A failing CHECK prints file:line and the expression, marks the test as
  * failed, and keeps going so one run shows every failure.
- *
- * Include this header from exactly one .c file (it defines static state).
  */
 #ifndef TCOMP_TEST_H
 #define TCOMP_TEST_H
 
 #include <stdio.h>
 
-static int test_current_failed;
-static int test_total;
-static int test_failed;
+/* Counters shared by all suites; defined in main.c. */
+extern int test_current_failed;
+extern int test_total;
+extern int test_failed;
+
+/* One entry per tests/unit/test_<module>.c file. */
+void suite_container(void);
+void suite_bitio(void);
 
 #define TEST(name) static void name(void)
 
@@ -42,10 +49,5 @@ static int test_failed;
             printf("ok   %s\n", #name);                                                            \
         }                                                                                          \
     } while (0)
-
-static inline int test_summary(void) {
-    printf("\n%d/%d tests passed\n", test_total - test_failed, test_total);
-    return test_failed == 0 ? 0 : 1;
-}
 
 #endif /* TCOMP_TEST_H */

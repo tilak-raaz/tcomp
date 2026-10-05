@@ -9,7 +9,7 @@
 #ifndef TCOMP_STATUS_H
 #define TCOMP_STATUS_H
 
-#define TCOMP_VERSION_STRING "0.0.0"
+#define TCOMP_VERSION_STRING "0.1.0"
 
 typedef enum {
     TCOMP_OK = 0,          /**< Success. Always zero so `if (st)` means "failed". */

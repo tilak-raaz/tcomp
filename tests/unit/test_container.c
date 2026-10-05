@@ -1,8 +1,6 @@
-/* Unit tests for the tcomp library.
+/* Unit tests for the .tcmp container (src/container.c) and status messages.
  *
- * Each milestone adds its own tests here (or in a new tests/unit/test_*.c
- * file registered in main below). Tests use tmpfile() so they never touch
- * the working directory.
+ * Tests use tmpfile() so they never touch the working directory.
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -167,7 +165,7 @@ TEST(test_null_arguments) {
     if (f) fclose(f);
 }
 
-int main(void) {
+void suite_container(void) {
     RUN(test_strerror_covers_every_code);
     RUN(test_strerror_unknown_code);
 
@@ -183,6 +181,4 @@ int main(void) {
     RUN(test_rejects_future_version);
     RUN(test_rejects_unknown_method);
     RUN(test_null_arguments);
-
-    return test_summary();
 }

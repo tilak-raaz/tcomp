@@ -4,7 +4,7 @@ A lossless file compressor written from scratch in C11.
 
 tcomp is being built milestone by milestone toward an LZ77 + canonical Huffman compressor (the same family as gzip/DEFLATE) with its own checksummed `.tcmp` file format, streaming I/O, multithreaded block compression, a benchmark suite and fuzz testing. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and current status.
 
-> **Status: M0 (project setup).** The CLI, file container, tests and CI are in place. The only method so far is `STORE` (no compression), which lets the whole pipeline be tested before real compression arrives in M2.
+> **Status: M1 (bit I/O) complete.** The CLI, file container, tests, CI and the bit-level writer/reader are in place. The only method so far is `STORE` (no compression); Huffman coding arrives in M2.
 
 ## Build
 
