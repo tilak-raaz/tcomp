@@ -1,6 +1,41 @@
 # Benchmarks
 
-Ratios are tracked from M2. Speed and memory benchmarking starts in M6.
+Ratios are tracked from M2. A first speed baseline was taken in M3; the full benchmark harness arrives in M6.
+
+## M3: LZ77 with fixed-width tokens
+
+Measured 2026-10-08 on the Canterbury corpus. Reproduce the size columns with `make corpus`.
+
+| File | Size | Huffman (M2) | LZ77 (M3) | LZ77 ratio | gzip -9 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| alice29.txt | 152,089 | 87,836 | 72,716 | 2.09 | 54,191 |
+| asyoulik.txt | 125,179 | 75,948 | 67,226 | 1.86 | 48,829 |
+| cp.html | 24,603 | 16,341 | 10,887 | 2.26 | 7,981 |
+| fields.c | 11,150 | 7,168 | 4,454 | 2.50 | 3,136 |
+| grammar.lsp | 3,721 | 2,312 | 1,852 | 2.01 | 1,246 |
+| kennedy.xls | 1,029,744 | 462,674 | 343,535 | 3.00 | 209,733 |
+| lcet10.txt | 426,754 | 250,715 | 192,242 | 2.22 | 144,429 |
+| plrabn12.txt | 481,861 | 275,744 | 267,223 | 1.80 | 194,277 |
+| ptt5 | 513,216 | 106,701 | 72,935 | 7.04 | 52,382 |
+| sum | 38,240 | 25,787 | 18,197 | 2.10 | 12,772 |
+| xargs.1 | 4,227 | 2,744 | 2,600 | 1.63 | 1,756 |
+| **Total** | **2,810,784** | **1,313,970** | **1,053,867** | **2.67** | **730,732** |
+
+**Speed baseline** (release build, gcc 13.3 `-O2`, Intel Xeon @ 2.80 GHz, whole corpus, includes process start-up per file):
+
+| Method | Compress | Decompress |
+| --- | ---: | ---: |
+| Huffman | 56 MB/s | 49 MB/s |
+| LZ77, naive matcher | **0.20 MB/s** | 76 MB/s |
+| LZ77 on 1 MiB of random data | 0.04 MB/s | — |
+
+**Analysis**
+
+- **LZ77 beats Huffman on every file**, 2.67× against 2.14× overall, without any entropy coding. Repeated strings carry more redundancy than skewed byte frequencies.
+- **The biggest gains are on structured data:** `fields.c` (2.50×, source code), `cp.html` (markup), `kennedy.xls` (3.00×, spreadsheet records) and `ptt5` (7.04×, long runs in a fax image, where Huffman could not go below 1 bit per byte).
+- **The smallest gain is `plrabn12.txt`** (1.80× vs 1.75×), English verse with few long repeats: there, byte frequencies are most of the redundancy, which is what Huffman captures. That is why combining both (M4) matters.
+- **Fixed-width fields leave bits on the table.** Every literal costs 9 bits and every distance 15, however common or small. gzip, which Huffman-codes both, is still 1.44× smaller overall.
+- **The naive matcher is 280× slower than Huffman.** Compression is O(n × window): on random data every one of the 32,768 candidates is tried at every position, hence 0.04 MB/s. Decompression is fast because it only copies bytes. The hash-chain matcher (M6) targets this number.
 
 ## M2: order-0 Huffman on the Canterbury corpus
 

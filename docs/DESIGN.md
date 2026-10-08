@@ -2,7 +2,7 @@
 
 This document explains how tcomp is put together and the conventions every module follows. It grows with each milestone.
 
-## Architecture (M2)
+## Architecture (M3)
 
 ```
              src/main.c  (CLI: argument parsing, -m METHOD, exit codes, messages)
@@ -12,9 +12,11 @@ This document explains how tcomp is put together and the conventions every modul
         │ libtcomp.a                                  │
         │                                             │
         │  container.c   header, method choice (AUTO), │
-        │       │        STORE and HUFFMAN payloads    │
+        │       │        STORE, HUFFMAN, LZ77 payloads │
         │       ├──► huffman.c   lengths, canonical    │
         │       │                codes, decode table   │
+        │       ├──► lz77.c      tokens, naive matcher,│
+        │       │                expansion             │
         │       └──► bitio.c     bit writer/reader     │
         │  status.c      error messages                │
         └────────────────────────────────────────────┘
@@ -24,9 +26,11 @@ The CLI and the unit tests both link against the same static library, so tests e
 
 **Data flow, HUFFMAN compression:** read all input → count byte frequencies → `tcomp_huff_build_lengths` → `tcomp_huff_assign_codes` → compute the exact output size; if it is not smaller than the input, write STORE instead → otherwise write header, size, 4-bit lengths and one code per byte through the bit writer.
 
-**Decompression:** read header → validate → read size and lengths → validate lengths and size → build the decode table → decode *n* symbols into a 64 KB output buffer → check padding.
+**Data flow, LZ77 compression:** read all input → `tcomp_lz77_parse` into a token array → write each token as a 9-bit literal or 24-bit match → header, size, bitstream.
 
-Planned modules, each added in its milestone: `lz77.c` (M3), `crc32.c` (M5), `matcher.c` (M6), `block.c` (M7), `threads.c` (M9).
+**Decompression:** read header → validate → dispatch on method. HUFFMAN: read size and lengths → validate → build the decode table → decode *n* symbols into a 64 KB output buffer → check padding. LZ77: read size → bound it by the bits available → decode tokens into a 96 KB sliding buffer that always keeps the last 32 KB → check padding.
+
+Planned modules, each added in its milestone: `crc32.c` (M5), `matcher.c` (M6), `block.c` (M7), `threads.c` (M9).
 
 ## Modules
 
@@ -55,6 +59,20 @@ Length-limited canonical Huffman coding for any alphabet up to 1024 symbols (M4 
 | `tcomp_huff_decode_symbol` | bit reader → symbol | Peek maxlen bits, look up the entry, skip only L bits. Empty entry → corrupt; L past the end → truncated. |
 
 Why one table lookup is enough: in a prefix code no code is the start of another, so whatever bits follow a code, the first maxlen bits identify it uniquely.
+
+### lz77 (`include/tcomp/lz77.h`, M3)
+
+Turns bytes into literal/match tokens and back, with DEFLATE's parameters (matches 3–258 bytes, window 32 KB). Knows nothing about bits; the container decides how tokens are encoded. See [decision 0005](decisions/0005-lz77-design.md).
+
+| Function | Does |
+| --- | --- |
+| `tcomp_lz77_parse` | Greedy parse with a naive matcher: at each position try every distance from 1 to the window, keep the longest match (nearest on ties), emit it if ≥ 3 bytes, else emit a literal. O(n × window). |
+| `tcomp_lz77_expand` | Tokens → bytes in a caller buffer, validating each token. Matches copy byte by byte so overlapping copies (distance < length) work. |
+| `tcomp_lz77_tokens_*` | A growable token array (4 bytes per token). |
+
+The matcher compares against the *input*, even where a match overlaps the bytes it is about to produce. That is correct because the decoder will have produced exactly those bytes, one at a time, by the time it reads them.
+
+The streaming decoder in `container.c` does not use `tcomp_lz77_expand`: it never holds more than 96 KB of output. When a token would not fit, it writes out everything not yet written and slides the newest 32 KB (all a match can reach) to the front of the buffer.
 
 ## Conventions
 

@@ -27,6 +27,7 @@ extern int test_failed;
 void suite_container(void);
 void suite_bitio(void);
 void suite_huffman(void);
+void suite_lz77(void);
 
 #define TEST(name) static void name(void)
 

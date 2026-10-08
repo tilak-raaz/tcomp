@@ -37,6 +37,7 @@ printf '\0' > "$DATA/one_zero_byte.bin"
 head -c 1048576 /dev/zero > "$DATA/zeros_1MiB.bin"
 head -c 65537 /dev/zero | tr '\0' 'A' > "$DATA/repeated_A_64KiB_plus_1.txt"
 head -c 1048576 /dev/urandom > "$DATA/random_1MiB.bin"
+head -c 16384 /dev/urandom > "$DATA/random_16KiB.bin"   # LZ77 worst case, small enough to be quick
 printf 'héllo wörld — ñandú 日本語 😀\n%.0s' $(seq 1 500) > "$DATA/utf8.txt"
 cat src/*.c include/tcomp/*.h > "$DATA/source_code.txt"
 cp "$TCOMP" "$DATA/executable.bin"
@@ -52,7 +53,12 @@ method_of() { od -An -tu1 -j5 -N1 "$1" | tr -d ' '; }  # header byte 5
 for f in "$DATA"/*; do
     name=$(basename "$f")
 
-    for m in auto store huffman; do
+    for m in auto store huffman lz77; do
+        # The naive LZ77 matcher needs minutes for 1 MiB of random data under
+        # the sanitizers; random_16KiB covers that case. Remove in M6.
+        if [ "$m" = lz77 ] && [ "$name" = random_1MiB.bin ]; then
+            continue
+        fi
         "$TCOMP" compress -m "$m" "$f" "$OUT/$name.$m.tcmp" \
             && "$TCOMP" decompress "$OUT/$name.$m.tcmp" "$OUT/$name.restored" \
             && cmp -s "$f" "$OUT/$name.restored" \
@@ -74,6 +80,10 @@ done
     && ok "auto uses huffman on text" || bad "auto uses huffman on text"
 [ "$(size_of "$OUT/source_code.txt.huffman.tcmp")" -lt $(( $(size_of "$DATA/source_code.txt") * 7 / 10 )) ] \
     && ok "huffman shrinks text below 70%" || bad "huffman shrinks text below 70%"
+[ "$(size_of "$OUT/zeros_1MiB.bin.lz77.tcmp")" -lt 20000 ] \
+    && ok "lz77 shrinks 1 MiB of zeros below 20 KB" || bad "lz77 shrinks 1 MiB of zeros below 20 KB"
+[ "$(size_of "$OUT/source_code.txt.lz77.tcmp")" -lt "$(size_of "$OUT/source_code.txt.huffman.tcmp")" ] \
+    && ok "lz77 beats huffman on source code" || bad "lz77 beats huffman on source code"
 
 # ---- negative tests: bad input must fail cleanly --------------------------
 # expect_fail <label> <file>: exit code must be exactly 1 and no output kept.
@@ -105,6 +115,13 @@ head -c -50 "$GOOD" > "$OUT/h_data.tcmp";        expect_fail "huffman: cut in da
 # Every code length 1: an impossible (oversubscribed) code.
 { printf 'TCMP\0\001\001\0\0\0\0\0\0\0'; head -c 128 /dev/zero | tr '\0' '\021'; printf '\0'; } > "$OUT/h_lens.tcmp"
 expect_fail "huffman: impossible code lengths" "$OUT/h_lens.tcmp"
+
+GOOD="$OUT/source_code.txt.lz77.tcmp"
+head -c -20 "$GOOD" > "$OUT/l_data.tcmp";          expect_fail "lz77: cut in data"       "$OUT/l_data.tcmp"
+{ cat "$GOOD"; printf 'X'; } > "$OUT/l_tail.tcmp"; expect_fail "lz77: trailing garbage" "$OUT/l_tail.tcmp"
+# size 3, then a match (flag 1) before any literal: reaches before the start.
+printf 'TCMP\0\002\003\0\0\0\0\0\0\0\200\0\0' > "$OUT/l_early.tcmp"
+expect_fail "lz77: match before any output" "$OUT/l_early.tcmp"
 
 # ---- CLI usage ------------------------------------------------------------
 "$TCOMP" > /dev/null 2>&1;            [ $? -eq 2 ] && ok "usage: no args exits 2" || bad "usage: no args exits 2"

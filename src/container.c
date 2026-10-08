@@ -6,6 +6,7 @@
 
 #include "tcomp/bitio.h"
 #include "tcomp/huffman.h"
+#include "tcomp/lz77.h"
 
 /* Layout (docs/FORMAT.md, version 0):
  *   header   magic "TCMP" (4) | format version (1) | method id (1)
@@ -13,6 +14,9 @@
  *   HUFFMAN  original size, uint64 little-endian (8)
  *            bitstream: 256 x 4-bit code lengths, then one code per byte,
  *            then 0-7 zero bits of padding
+ *   LZ77     original size, uint64 little-endian (8)
+ *            bitstream: tokens (9-bit literals, 24-bit matches), then
+ *            0-7 zero bits of padding
  */
 enum {
     HEADER_SIZE = 6,
@@ -20,7 +24,11 @@ enum {
     COPY_CHUNK = 64 * 1024,
     SIZE_FIELD = 8,
     BYTE_SYMBOLS = 256,
-    LENGTH_BITS = 4
+    LENGTH_BITS = 4,
+    LZ_LITERAL_BITS = 1 + 8,
+    LZ_LENGTH_BITS = 8,    /* length - 3:   0..255 -> 3..258 */
+    LZ_DISTANCE_BITS = 15, /* distance - 1: 0..32767 -> 1..32768 */
+    LZ_MATCH_BITS = 1 + LZ_LENGTH_BITS + LZ_DISTANCE_BITS
 };
 
 static const uint8_t MAGIC[4] = {'T', 'C', 'M', 'P'};
@@ -112,6 +120,32 @@ static uint64_t load_le64(const uint8_t *p) {
     return v;
 }
 
+/* Header, 8-byte original size, then the bitstream: the layout shared by
+ * every method except STORE. */
+static tcomp_status write_sized_payload(FILE *out, tcomp_method method, uint64_t size,
+                                        const tcomp_bitwriter *bw) {
+    uint8_t size_field[SIZE_FIELD];
+    store_le64(size_field, size);
+    tcomp_status st = write_header(out, method);
+    if (st == TCOMP_OK) {
+        st = write_all(out, size_field, sizeof size_field);
+    }
+    if (st == TCOMP_OK) {
+        st = write_all(out, tcomp_bw_data(bw), tcomp_bw_size(bw));
+    }
+    return st;
+}
+
+/* After the last symbol only zero padding (under one byte) may remain.
+ * Anything else means the size field and the data disagree. */
+static tcomp_status check_padding(const tcomp_bitreader *br) {
+    size_t left = tcomp_br_bits_remaining(br);
+    if (left >= 8 || tcomp_br_peek_bits(br, (unsigned)left) != 0) {
+        return TCOMP_ERR_CORRUPT;
+    }
+    return TCOMP_OK;
+}
+
 /* ---- compression -------------------------------------------------------- */
 
 static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_method method,
@@ -158,16 +192,46 @@ static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_metho
         st = tcomp_bw_flush(&bw);
     }
 
-    uint8_t size_field[SIZE_FIELD];
-    store_le64(size_field, len);
     if (st == TCOMP_OK) {
-        st = write_header(out, TCOMP_METHOD_HUFFMAN);
+        st = write_sized_payload(out, TCOMP_METHOD_HUFFMAN, len, &bw);
+    }
+    tcomp_bw_free(&bw);
+    return st;
+}
+
+/* LZ77 tokens as fixed-width fields:
+ *   literal  0 + byte                      (9 bits)
+ *   match    1 + (length - 3) + (distance - 1)  (1 + 8 + 15 = 24 bits) */
+static tcomp_status compress_lz77(const uint8_t *data, size_t len, FILE *out) {
+    tcomp_lz77_tokens tokens;
+    tcomp_lz77_tokens_init(&tokens);
+    tcomp_status st = tcomp_lz77_parse(data, len, TCOMP_LZ77_WINDOW, &tokens);
+
+    tcomp_bitwriter bw;
+    if (st == TCOMP_OK) {
+        st = tcomp_bw_init(&bw, len / 2 + 16);
+    }
+    if (st != TCOMP_OK) {
+        tcomp_lz77_tokens_free(&tokens);
+        return st;
+    }
+    for (size_t t = 0; t < tokens.count && st == TCOMP_OK; t++) {
+        const tcomp_lz77_token *tok = &tokens.items[t];
+        if (tok->distance == 0) {
+            st = tcomp_bw_write_bits(&bw, tok->length, LZ_LITERAL_BITS);
+        } else {
+            uint32_t field = 1u << (LZ_LENGTH_BITS + LZ_DISTANCE_BITS) |
+                             (uint32_t)(tok->length - TCOMP_LZ77_MIN_MATCH) << LZ_DISTANCE_BITS |
+                             (uint32_t)(tok->distance - 1);
+            st = tcomp_bw_write_bits(&bw, field, LZ_MATCH_BITS);
+        }
+    }
+    tcomp_lz77_tokens_free(&tokens);
+    if (st == TCOMP_OK) {
+        st = tcomp_bw_flush(&bw);
     }
     if (st == TCOMP_OK) {
-        st = write_all(out, size_field, sizeof size_field);
-    }
-    if (st == TCOMP_OK) {
-        st = write_all(out, tcomp_bw_data(&bw), tcomp_bw_size(&bw));
+        st = write_sized_payload(out, TCOMP_METHOD_LZ77, len, &bw);
     }
     tcomp_bw_free(&bw);
     return st;
@@ -181,7 +245,8 @@ tcomp_status tcomp_compress_stream(FILE *in, FILE *out, tcomp_method method) {
         tcomp_status st = write_header(out, TCOMP_METHOD_STORE);
         return st != TCOMP_OK ? st : copy_stream(in, out);
     }
-    if (method != TCOMP_METHOD_HUFFMAN && method != TCOMP_METHOD_AUTO) {
+    if (method != TCOMP_METHOD_HUFFMAN && method != TCOMP_METHOD_LZ77 &&
+        method != TCOMP_METHOD_AUTO) {
         return TCOMP_ERR_INVALID_ARG;
     }
 
@@ -189,7 +254,8 @@ tcomp_status tcomp_compress_stream(FILE *in, FILE *out, tcomp_method method) {
     size_t len = 0;
     tcomp_status st = read_all(in, &data, &len);
     if (st == TCOMP_OK) {
-        st = compress_memory(data, len, method, out);
+        st = method == TCOMP_METHOD_LZ77 ? compress_lz77(data, len, out)
+                                         : compress_memory(data, len, method, out);
     }
     free(data);
     return st;
@@ -247,13 +313,8 @@ static tcomp_status decode_huffman_payload(const uint8_t *payload, size_t len, u
     }
     tcomp_huff_decoder_free(&dec);
 
-    /* After the last symbol only zero padding (under one byte) may remain.
-     * Anything else means the size field and the data disagree. */
     if (st == TCOMP_OK) {
-        size_t left = tcomp_br_bits_remaining(&br);
-        if (left >= 8 || tcomp_br_peek_bits(&br, (unsigned)left) != 0) {
-            st = TCOMP_ERR_CORRUPT;
-        }
+        st = check_padding(&br);
     }
     if (st == TCOMP_OK) {
         st = write_all(out, buf, used);
@@ -262,7 +323,98 @@ static tcomp_status decode_huffman_payload(const uint8_t *payload, size_t len, u
     return st;
 }
 
-static tcomp_status decompress_huffman(FILE *in, FILE *out) {
+/* Read one LZ77 token: returns its length and fills *literal or *distance. */
+static tcomp_status read_lz77_token(tcomp_bitreader *br, unsigned *length, unsigned *distance,
+                                    uint8_t *literal) {
+    uint32_t flag, v;
+    tcomp_status st = tcomp_br_read_bits(br, 1, &flag);
+    if (st != TCOMP_OK) {
+        return st;
+    }
+    if (flag == 0) {
+        st = tcomp_br_read_bits(br, 8, &v);
+        *literal = (uint8_t)v;
+        *length = 1;
+        *distance = 0;
+        return st;
+    }
+    st = tcomp_br_read_bits(br, LZ_LENGTH_BITS, &v);
+    if (st != TCOMP_OK) {
+        return st;
+    }
+    *length = v + TCOMP_LZ77_MIN_MATCH;
+    st = tcomp_br_read_bits(br, LZ_DISTANCE_BITS, &v);
+    *distance = v + 1;
+    return st;
+}
+
+/* Decode LZ77 tokens straight to `out`, keeping only the last 32 KB of
+ * output in memory: memory use is constant no matter what `size` claims.
+ *
+ * buf holds [already written | not yet written]; when a token would not
+ * fit, the unwritten part is flushed and the newest WINDOW bytes (all a
+ * match can reach) slide to the front. */
+static tcomp_status decode_lz77_payload(const uint8_t *payload, size_t len, uint64_t size,
+                                        FILE *out) {
+    tcomp_bitreader br;
+    tcomp_status st = tcomp_br_init(&br, payload, len);
+    if (st != TCOMP_OK) {
+        return st;
+    }
+    /* Each token takes at least 9 bits and produces at most 258 bytes. */
+    if (size > (uint64_t)(tcomp_br_bits_remaining(&br) / LZ_LITERAL_BITS) * TCOMP_LZ77_MAX_MATCH) {
+        return TCOMP_ERR_TRUNCATED;
+    }
+
+    enum { BUF = TCOMP_LZ77_WINDOW + COPY_CHUNK };
+    uint8_t *buf = malloc(BUF);
+    if (buf == NULL) {
+        return TCOMP_ERR_NOMEM;
+    }
+    size_t pos = 0, flushed = 0;
+    uint64_t produced = 0;
+
+    while (produced < size && st == TCOMP_OK) {
+        unsigned length, distance;
+        uint8_t literal = 0;
+        st = read_lz77_token(&br, &length, &distance, &literal);
+        if (st != TCOMP_OK) {
+            break;
+        }
+        if (distance > produced || length > size - produced) {
+            st = TCOMP_ERR_CORRUPT; /* reaches before the start, or past the end */
+            break;
+        }
+        if (pos + length > BUF) {
+            st = write_all(out, buf + flushed, pos - flushed);
+            memmove(buf, buf + pos - TCOMP_LZ77_WINDOW, TCOMP_LZ77_WINDOW);
+            pos = flushed = TCOMP_LZ77_WINDOW;
+        }
+        if (distance == 0) {
+            buf[pos++] = literal;
+        } else {
+            for (unsigned k = 0; k < length; k++, pos++) { /* may overlap: byte by byte */
+                buf[pos] = buf[pos - distance];
+            }
+        }
+        produced += length;
+    }
+
+    if (st == TCOMP_OK) {
+        st = check_padding(&br);
+    }
+    if (st == TCOMP_OK) {
+        st = write_all(out, buf + flushed, pos - flushed);
+    }
+    free(buf);
+    return st;
+}
+
+typedef tcomp_status (*payload_decoder)(const uint8_t *payload, size_t len, uint64_t size,
+                                        FILE *out);
+
+/* Read the 8-byte size field and the rest of the file, then decode. */
+static tcomp_status decompress_sized(FILE *in, FILE *out, payload_decoder decode) {
     uint8_t size_field[SIZE_FIELD];
     size_t got = fread(size_field, 1, sizeof size_field, in);
     if (ferror(in)) {
@@ -276,7 +428,7 @@ static tcomp_status decompress_huffman(FILE *in, FILE *out) {
     size_t len = 0;
     tcomp_status st = read_all(in, &payload, &len);
     if (st == TCOMP_OK) {
-        st = decode_huffman_payload(payload, len, load_le64(size_field), out);
+        st = decode(payload, len, load_le64(size_field), out);
     }
     free(payload);
     return st;
@@ -308,7 +460,9 @@ tcomp_status tcomp_decompress_stream(FILE *in, FILE *out) {
     case TCOMP_METHOD_STORE:
         return copy_stream(in, out);
     case TCOMP_METHOD_HUFFMAN:
-        return decompress_huffman(in, out);
+        return decompress_sized(in, out, decode_huffman_payload);
+    case TCOMP_METHOD_LZ77:
+        return decompress_sized(in, out, decode_lz77_payload);
     default:
         return TCOMP_ERR_BAD_METHOD;
     }

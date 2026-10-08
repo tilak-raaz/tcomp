@@ -22,13 +22,16 @@ size_of() { wc -c < "$1" | tr -d ' '; }
 
 fail=0
 total_in=0
-total_out=0
-printf '%-14s %10s %10s %7s\n' file original huffman ratio
+total_huff=0
+total_lz=0
+row() { awk -v n="$1" -v a="$2" -v h="$3" -v l="$4" \
+        'BEGIN { printf "%-14s %10d %10d %6.2fx %10d %6.2fx\n", n, a, h, a / h, l, a / l }'; }
+printf '%-14s %10s %10s %7s %10s %7s\n' file original huffman ratio lz77 ratio
 for f in "$CORPUS"/*; do
     name=$(basename "$f")
     [ "$name" = SHA1SUM ] && continue
 
-    for m in huffman auto; do
+    for m in huffman lz77 auto; do
         if ! { "$TCOMP" compress -m "$m" "$f" "$WORK/$name.$m.tcmp" \
                && "$TCOMP" decompress "$WORK/$name.$m.tcmp" "$WORK/$name.out" \
                && cmp -s "$f" "$WORK/$name.out"; }; then
@@ -38,12 +41,14 @@ for f in "$CORPUS"/*; do
     done
 
     in=$(size_of "$f")
-    out=$(size_of "$WORK/$name.huffman.tcmp")
+    huff=$(size_of "$WORK/$name.huffman.tcmp")
+    lz=$(size_of "$WORK/$name.lz77.tcmp")
     total_in=$((total_in + in))
-    total_out=$((total_out + out))
-    awk -v n="$name" -v a="$in" -v b="$out" 'BEGIN { printf "%-14s %10d %10d %7.2f\n", n, a, b, a / b }'
+    total_huff=$((total_huff + huff))
+    total_lz=$((total_lz + lz))
+    row "$name" "$in" "$huff" "$lz"
 done
-awk -v a="$total_in" -v b="$total_out" 'BEGIN { printf "%-14s %10d %10d %7.2f\n", "TOTAL", a, b, a / b }'
+row TOTAL "$total_in" "$total_huff" "$total_lz"
 
 echo
 if [ "$fail" -eq 0 ]; then
