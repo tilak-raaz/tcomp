@@ -4,7 +4,7 @@ This document specifies every byte of a `.tcmp` file. It should be precise enoug
 
 Conventions: offsets and sizes are in bytes. Multi-byte integers are **little-endian**. Bit-packed data is **MSB-first**: the first bit of the stream is the most significant bit (0x80) of the first byte, and each multi-bit field is stored from its most significant bit down. A bitstream ends with 0 bits padding it to a whole byte.
 
-## Version 0 (current, M0–M2)
+## Version 0 (current, M0–M3)
 
 Version 0 is a minimal container used while the real codec is built.
 
@@ -21,8 +21,9 @@ Version 0 is a minimal container used while the real codec is built.
 | --- | --- | --- | --- |
 | 0 | STORE | M0 | The original data, unchanged, up to end of file |
 | 1 | HUFFMAN | M2 | Order-0 canonical Huffman coding of bytes (below) |
+| 2 | LZ77 | M3 | LZ77 tokens in fixed-width fields (below) |
 
-All other method ids are reserved. The CLI's `-m auto` is not a method id: it chooses STORE or HUFFMAN, whichever is smaller.
+All other method ids are reserved. The CLI's `-m auto` is not a method id: it chooses STORE or HUFFMAN, whichever is smaller (LZ77 joins once its matcher is fast, M6).
 
 ### HUFFMAN payload (method 1)
 
@@ -45,6 +46,26 @@ The bitstream contains, in order:
 
 Example: lengths `A=2, B=1, C=3, D=3` give codes `B=0, A=10, C=110, D=111`.
 
+### LZ77 payload (method 2)
+
+| Offset in payload | Size | Field |
+| --- | --- | --- |
+| 0 | 8 | Original size *n* in bytes, unsigned little-endian |
+| 8 | rest of file | Bitstream |
+
+The bitstream is a sequence of tokens, then 0–7 zero bits of padding. Each token starts with a 1-bit flag:
+
+| Flag | Token | Following fields | Total bits |
+| --- | --- | --- | --- |
+| `0` | Literal | 8 bits: the byte value | 9 |
+| `1` | Match | 8 bits: *length* − 3; 15 bits: *distance* − 1 | 24 |
+
+A literal appends one byte to the output. A match appends *length* (3–258) bytes copied from *distance* (1–32768) bytes before the current end of the output, **one byte at a time**: when *distance* < *length* the copy reads bytes it has just written, which repeats the last *distance* bytes.
+
+Example: the tokens `0 'a'`, `0 'b'`, `1 (length 7, distance 2)` decode to `ababababa`.
+
+Tokens continue until exactly *n* bytes have been produced.
+
 ### Decoder rules
 
 A decoder must check, in this order:
@@ -62,10 +83,20 @@ For HUFFMAN, additionally:
 8. Every code read matches a symbol → otherwise *corrupt*; the data does not end inside a code → otherwise *truncated*.
 9. After *n* codes, fewer than 8 bits remain and all of them are 0 → otherwise *corrupt*.
 
+For LZ77, after rule 4:
+
+5. The size field is present → otherwise *truncated*.
+6. *n* ≤ ⌊bits remaining / 9⌋ × 258, since every token is at least 9 bits and produces at most 258 bytes → otherwise *truncated*. Checked before any output is written.
+7. Each match's *distance* ≤ bytes produced so far → otherwise *corrupt*.
+8. Each token's length ≤ *n* − bytes produced so far → otherwise *corrupt*.
+9. The data does not end inside a token → otherwise *truncated*.
+10. After *n* bytes, fewer than 8 bits remain and all of them are 0 → otherwise *corrupt*.
+
 ### Known limitations of version 0
 
-- No checksum. A STORE file truncated inside its payload cannot be detected, and some single-bit corruptions of HUFFMAN data decode to wrong output without error. Version 1 (M5) adds a CRC32.
-- HUFFMAN compression reads the whole input into memory. Blocks (M7) remove this.
+- No checksum. A STORE file truncated inside its payload cannot be detected, and some single-bit corruptions of HUFFMAN or LZ77 data decode to wrong output without error. Version 1 (M5) adds a CRC32.
+- HUFFMAN and LZ77 compression read the whole input into memory. Blocks (M7) remove this.
+- LZ77's fixed-width fields are deliberately simple; M4 replaces them with Huffman codes.
 
 ## Planned changes
 

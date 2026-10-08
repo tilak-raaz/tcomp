@@ -4,7 +4,7 @@ A lossless file compressor written from scratch in C11.
 
 tcomp is being built milestone by milestone toward an LZ77 + canonical Huffman compressor (the same family as gzip/DEFLATE) with its own checksummed `.tcmp` file format, streaming I/O, multithreaded block compression, a benchmark suite and fuzz testing. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and current status.
 
-> **Status: M2 (Huffman) complete.** tcomp compresses with canonical Huffman coding, within about 1% of the order-0 entropy bound on large text files (2.14× on the Canterbury corpus overall). LZ77 arrives in M3.
+> **Status: M3 (LZ77) complete.** tcomp compresses with canonical Huffman coding (2.14× on the Canterbury corpus) or LZ77 back-references (2.67×). M4 combines them, DEFLATE-style.
 
 ## Build
 
@@ -29,7 +29,7 @@ sudo apt install "libclang-rt-$(clang -dumpversion | cut -d. -f1)-dev"   # sanit
 
 ```sh
 tcomp compress   input.txt  output.tcmp     # picks the smallest method
-tcomp compress -m huffman input.txt out.tcmp  # force a method: auto | huffman | store
+tcomp compress -m lz77 input.txt out.tcmp     # force a method: auto | huffman | lz77 | store
 tcomp decompress output.tcmp restored.txt     # method is read from the file
 tcomp --version
 
@@ -62,7 +62,7 @@ docs/            roadmap, format spec, design, benchmarks, decision notes
 
 ## Benchmarks
 
-Canterbury corpus, order-0 Huffman (M2): **2,810,784 → 1,313,970 bytes (2.14×)**, within 3.1% of the order-0 entropy bound overall and about 1% on large text files. Per-file results and analysis in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Speed benchmarks against gzip, bzip2, xz and zstd start in M6.
+Canterbury corpus (2,810,784 bytes): **Huffman 2.14×, LZ77 2.67×**, against gzip -9 at 3.85×. LZ77 currently uses a naive O(n × window) matcher at 0.2 MB/s; the hash-chain matcher in M6 is measured against that baseline. Per-file results and analysis in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## License
 

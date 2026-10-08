@@ -2,6 +2,21 @@
 
 All notable changes, one section per milestone tag. Newest first.
 
+## v0.3-lz77 (M3): 2026-10-08
+
+### Added
+- LZ77 module (`include/tcomp/lz77.h`, `src/lz77.c`): literal/match tokens with DEFLATE parameters (matches 3–258 bytes, 32 KB window), a naive greedy matcher, and a validating expander.
+- LZ77 method (id 2): original size, then 9-bit literals and 24-bit matches ([docs/FORMAT.md](docs/FORMAT.md)). `tcomp compress -m lz77`.
+- Streaming LZ77 decoder with a 96 KB sliding buffer: constant memory, whatever the size field claims. Rejects matches reaching before the start of the output or past the declared size.
+- 10 LZ77 unit tests (exact tokenizations, overlap, window limit, length cap, invalid tokens, seeded random roundtrips over 5 window sizes) and 3 container tests built from hand-made token streams, including 300 KB of matches at the full 32 KB distance.
+- `make corpus` now also round-trips every Canterbury file with LZ77 and prints both ratios.
+- Decision note 0005; LZ77 results and the naive matcher speed baseline in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+### Changed
+- Roundtrip script tests LZ77 on every file except 1 MiB of random data (too slow for the naive matcher under sanitizers) and adds a 16 KiB random file for the worst case (95 checks).
+- `-m auto` still chooses between STORE and HUFFMAN only; LZ77 joins once it is fast (M6).
+- Version string bumped to 0.3.0.
+
 ## v0.2-huffman (M2): 2026-10-06
 
 ### Added

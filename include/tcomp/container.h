@@ -15,27 +15,29 @@
 
 #include "tcomp/status.h"
 
-/** Compression methods. STORE and HUFFMAN values are part of the file format. */
+/** Compression methods. Values 0-254 are part of the file format. */
 typedef enum {
     TCOMP_METHOD_STORE = 0,   /**< No compression; payload is the raw input. */
     TCOMP_METHOD_HUFFMAN = 1, /**< Order-0 canonical Huffman coding of bytes. */
-    TCOMP_METHOD_AUTO = 255   /**< Request only: use whichever method gives the smaller
-                                   file. Never written to a file. */
+    TCOMP_METHOD_LZ77 = 2,    /**< LZ77 tokens in fixed-width fields (no entropy coding). */
+    TCOMP_METHOD_AUTO = 255   /**< Request only: the smaller of STORE and HUFFMAN.
+                                   Never written to a file. */
 } tcomp_method;
 
 /**
  * @brief Compress everything readable from @p in and write a .tcmp stream to @p out.
  *
  * Reads until EOF. Does not close either stream. STORE streams its input with
- * constant memory; HUFFMAN and AUTO read the whole input into memory first,
- * because Huffman needs symbol counts before it can encode (blocks in M7
- * remove this limit).
+ * constant memory; the other methods read the whole input into memory first
+ * (blocks in M7 remove this limit).
  *
  * @param in     Open stream, read in binary mode. Must not be NULL.
  * @param out    Open stream, written in binary mode. Must not be NULL.
- * @param method STORE, HUFFMAN, or AUTO (recommended). AUTO picks HUFFMAN
- *               only when it is strictly smaller, so the output is never more
- *               than the header larger than the input.
+ * @param method STORE, HUFFMAN, LZ77, or AUTO (recommended). AUTO picks
+ *               HUFFMAN only when it is strictly smaller than STORE, so the
+ *               output is never more than the header larger than the input.
+ *               AUTO does not try LZ77 yet: its naive matcher is too slow
+ *               for a default until the hash-chain matcher (M6).
  * @return TCOMP_OK, TCOMP_ERR_INVALID_ARG, TCOMP_ERR_NOMEM or TCOMP_ERR_IO.
  */
 tcomp_status tcomp_compress_stream(FILE *in, FILE *out, tcomp_method method);

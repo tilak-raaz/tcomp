@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tcomp/bitio.h"
 #include "tcomp/container.h"
+#include "tcomp/lz77.h"
 #include "tcomp/status.h"
 #include "test.h"
 
@@ -91,7 +93,60 @@ static int roundtrips_with(const uint8_t *data, size_t len, tcomp_method method)
 static int roundtrips(const uint8_t *data, size_t len) {
     return roundtrips_with(data, len, TCOMP_METHOD_STORE) &&
            roundtrips_with(data, len, TCOMP_METHOD_HUFFMAN) &&
+           roundtrips_with(data, len, TCOMP_METHOD_LZ77) &&
            roundtrips_with(data, len, TCOMP_METHOD_AUTO);
+}
+
+/* Hand-build an LZ77 file from tokens, encoded exactly as FORMAT.md says.
+ * Returns a malloc'd buffer (caller frees) and its length in *out_len.
+ * Lets tests create token streams the parser would never produce. */
+static uint8_t *build_lz77_file(const tcomp_lz77_token *tokens, size_t count, uint64_t size,
+                                size_t *out_len) {
+    tcomp_bitwriter bw;
+    if (tcomp_bw_init(&bw, 0) != TCOMP_OK) {
+        return NULL;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (tokens[i].distance == 0) {
+            tcomp_bw_write_bits(&bw, tokens[i].length, 9);
+        } else {
+            tcomp_bw_write_bits(&bw, 1, 1);
+            tcomp_bw_write_bits(&bw, tokens[i].length - 3u, 8);
+            tcomp_bw_write_bits(&bw, tokens[i].distance - 1u, 15);
+        }
+    }
+    tcomp_bw_flush(&bw);
+    size_t n = 6 + 8 + tcomp_bw_size(&bw);
+    uint8_t *buf = malloc(n);
+    if (buf != NULL) {
+        const uint8_t header[6] = {'T', 'C', 'M', 'P', 0, TCOMP_METHOD_LZ77};
+        memcpy(buf, header, 6);
+        for (int i = 0; i < 8; i++) {
+            buf[6 + i] = (uint8_t)(size >> (8 * i));
+        }
+        if (tcomp_bw_size(&bw) > 0) {
+            memcpy(buf + 14, tcomp_bw_data(&bw), tcomp_bw_size(&bw));
+        }
+        *out_len = n;
+    }
+    tcomp_bw_free(&bw);
+    return buf;
+}
+
+/* Decompress `file` and compare the output with `expected`. */
+static tcomp_status decompress_and_compare(const uint8_t *file, size_t len, const uint8_t *expected,
+                                           size_t expected_len, int *matches) {
+    FILE *in = file_with(file, len);
+    FILE *out = tmpfile();
+    tcomp_status st = (in && out) ? tcomp_decompress_stream(in, out) : TCOMP_ERR_IO;
+    size_t got_len = 0;
+    uint8_t *got = (st == TCOMP_OK) ? slurp(out, &got_len) : NULL;
+    *matches = got != NULL && got_len == expected_len &&
+               (expected_len == 0 || memcmp(got, expected, expected_len) == 0);
+    free(got);
+    if (in) fclose(in);
+    if (out) fclose(out);
+    return st;
 }
 
 /* Hand-build a HUFFMAN file: header, size field, 4-bit code lengths
@@ -366,6 +421,99 @@ TEST(test_huffman_rejects_trailing_data) {
     free(good);
 }
 
+/* ---- LZ77 payload ------------------------------------------------------- */
+
+TEST(test_lz77_long_distances_across_buffer_refills) {
+    /* 32 KB of pseudo-random literals, then 300 KB copied from exactly
+     * 32768 bytes back: every match reaches the far edge of the window,
+     * and the decoder's 96 KB buffer slides several times. */
+    enum { LITERALS = TCOMP_LZ77_WINDOW, MATCHES = 1200 };
+    size_t count = LITERALS + MATCHES;
+    tcomp_lz77_token *tokens = malloc(count * sizeof *tokens);
+    size_t total = LITERALS + (size_t)MATCHES * 250;
+    uint8_t *expected = malloc(total);
+    CHECK(tokens != NULL && expected != NULL);
+    if (tokens == NULL || expected == NULL) {
+        free(tokens);
+        free(expected);
+        return;
+    }
+    uint32_t x = 99;
+    for (size_t i = 0; i < LITERALS; i++) {
+        x = x * 1103515245u + 12345u;
+        tokens[i].length = (uint16_t)(x >> 24);
+        tokens[i].distance = 0;
+    }
+    for (size_t i = LITERALS; i < count; i++) {
+        tokens[i].length = 250;
+        tokens[i].distance = TCOMP_LZ77_WINDOW;
+    }
+    size_t n = 0;
+    CHECK(tcomp_lz77_expand(tokens, count, expected, total, &n) == TCOMP_OK && n == total);
+
+    size_t file_len = 0;
+    uint8_t *file = build_lz77_file(tokens, count, total, &file_len);
+    int matches = 0;
+    CHECK(file != NULL);
+    if (file != NULL) {
+        CHECK(decompress_and_compare(file, file_len, expected, total, &matches) == TCOMP_OK);
+        CHECK(matches);
+    }
+    free(file);
+    free(tokens);
+    free(expected);
+}
+
+TEST(test_lz77_rejects_invalid_tokens) {
+    size_t len = 0;
+    int matches;
+    /* A match before any output exists. */
+    const tcomp_lz77_token first_match[] = {{3, 1}};
+    uint8_t *f = build_lz77_file(first_match, 1, 3, &len);
+    CHECK(f && decompress_and_compare(f, len, NULL, 0, &matches) == TCOMP_ERR_CORRUPT);
+    free(f);
+
+    /* Reaching further back than the output so far. */
+    const tcomp_lz77_token too_far[] = {{'a', 0}, {'b', 0}, {3, 3}};
+    f = build_lz77_file(too_far, 3, 5, &len);
+    CHECK(f && decompress_and_compare(f, len, NULL, 0, &matches) == TCOMP_ERR_CORRUPT);
+    free(f);
+
+    /* A match running past the declared size. */
+    const tcomp_lz77_token overrun[] = {{'a', 0}, {10, 1}};
+    f = build_lz77_file(overrun, 2, 5, &len);
+    CHECK(f && decompress_and_compare(f, len, NULL, 0, &matches) == TCOMP_ERR_CORRUPT);
+    free(f);
+
+    /* Fewer tokens than the size needs. */
+    const tcomp_lz77_token short_stream[] = {{'a', 0}, {'b', 0}};
+    f = build_lz77_file(short_stream, 2, 3, &len);
+    CHECK(f && decompress_and_compare(f, len, NULL, 0, &matches) == TCOMP_ERR_TRUNCATED);
+    free(f);
+
+    /* A size no token stream of this length could produce: caught up front. */
+    f = build_lz77_file(short_stream, 2, 1000000, &len);
+    CHECK(f && decompress_and_compare(f, len, NULL, 0, &matches) == TCOMP_ERR_TRUNCATED);
+    free(f);
+}
+
+TEST(test_lz77_rejects_trailing_data) {
+    const tcomp_lz77_token ab[] = {{'a', 0}, {'b', 0}};
+    size_t len = 0;
+    int matches = 0;
+    uint8_t *f = build_lz77_file(ab, 2, 2, &len);
+    CHECK(f != NULL);
+    if (f == NULL) {
+        return;
+    }
+    CHECK(decompress_and_compare(f, len, (const uint8_t *)"ab", 2, &matches) == TCOMP_OK);
+    CHECK(matches);
+    /* 18 data bits leave 6 padding bits in the last byte; they must be 0. */
+    f[len - 1] |= 0x01;
+    CHECK(decompress_and_compare(f, len, NULL, 0, &matches) == TCOMP_ERR_CORRUPT);
+    free(f);
+}
+
 TEST(test_null_arguments) {
     FILE *f = tmpfile();
     CHECK(tcomp_compress_stream(NULL, f, TCOMP_METHOD_AUTO) == TCOMP_ERR_INVALID_ARG);
@@ -403,6 +551,10 @@ void suite_container(void) {
     RUN(test_huffman_rejects_huge_size_quickly);
     RUN(test_huffman_validates_size_before_writing);
     RUN(test_huffman_rejects_trailing_data);
+
+    RUN(test_lz77_long_distances_across_buffer_refills);
+    RUN(test_lz77_rejects_invalid_tokens);
+    RUN(test_lz77_rejects_trailing_data);
 
     RUN(test_null_arguments);
 }
