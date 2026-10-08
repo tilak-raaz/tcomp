@@ -4,7 +4,8 @@
 #   make BUILD=release   optimised build               -> build/release/tcomp
 #   make test            unit tests + roundtrip tests (debug unless BUILD is set)
 #   make CC=clang test   same, with clang
-#   make format          reformat all C files with clang-format
+#   make corpus          download the Canterbury corpus, round-trip it, print ratios
+#   make format         reformat all C files with clang-format
 #   make format-check    fail if any file is not formatted (used by CI)
 #   make clean
 
@@ -41,7 +42,7 @@ TEST_BIN  := $(BUILDDIR)/unit_tests
 
 FORMAT_FILES := $(wildcard src/*.c include/tcomp/*.h tests/unit/*.c tests/unit/*.h)
 
-.PHONY: all test unit roundtrip clean format format-check
+.PHONY: all test unit roundtrip corpus clean format format-check
 
 all: $(CLI)
 
@@ -51,8 +52,9 @@ $(LIB): $(LIB_OBJS)
 $(CLI): $(CLI_OBJ) $(LIB)
 	$(CC) $(LDFLAGS) -o $@ $^
 
+# Tests link libm for log2() in the entropy-bound test; the library itself needs no libm.
 $(TEST_BIN): $(TEST_OBJS) $(LIB)
-	$(CC) $(LDFLAGS) -o $@ $^
+	$(CC) $(LDFLAGS) -o $@ $^ -lm
 
 $(OBJDIR)/src/%.o: src/%.c
 	@mkdir -p $(@D)
@@ -69,6 +71,10 @@ unit: $(TEST_BIN)
 
 roundtrip: $(CLI)
 	./tests/roundtrip.sh $(CLI) $(BUILDDIR)/testdata
+
+corpus: $(CLI)
+	./bench/fetch-corpus.sh
+	./tests/corpus.sh $(CLI) $(BUILDDIR)/corpus
 
 clean:
 	rm -rf build

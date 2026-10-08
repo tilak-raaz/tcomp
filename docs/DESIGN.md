@@ -2,25 +2,31 @@
 
 This document explains how tcomp is put together and the conventions every module follows. It grows with each milestone.
 
-## Architecture (M1)
+## Architecture (M2)
 
 ```
-             src/main.c  (CLI: argument parsing, opening files, exit codes, messages)
+             src/main.c  (CLI: argument parsing, -m METHOD, exit codes, messages)
                   │
                   ▼
-        ┌──────────────────────────────────┐
-        │ libtcomp.a                        │
-        │                                   │
-        │  container.c   header + method    │
-        │                dispatch           │
-        │  bitio.c       bit writer/reader  │  (used by the codecs from M2)
-        │  status.c      error messages     │
-        └──────────────────────────────────┘
+        ┌────────────────────────────────────────────┐
+        │ libtcomp.a                                  │
+        │                                             │
+        │  container.c   header, method choice (AUTO), │
+        │       │        STORE and HUFFMAN payloads    │
+        │       ├──► huffman.c   lengths, canonical    │
+        │       │                codes, decode table   │
+        │       └──► bitio.c     bit writer/reader     │
+        │  status.c      error messages                │
+        └────────────────────────────────────────────┘
 ```
 
 The CLI and the unit tests both link against the same static library, so tests exercise exactly the code the CLI ships.
 
-Planned modules, each added in its milestone: `huffman.c` (M2), `lz77.c` (M3), `crc32.c` (M5), `matcher.c` (M6), `block.c` (M7), `threads.c` (M9).
+**Data flow, HUFFMAN compression:** read all input → count byte frequencies → `tcomp_huff_build_lengths` → `tcomp_huff_assign_codes` → compute the exact output size; if it is not smaller than the input, write STORE instead → otherwise write header, size, 4-bit lengths and one code per byte through the bit writer.
+
+**Decompression:** read header → validate → read size and lengths → validate lengths and size → build the decode table → decode *n* symbols into a 64 KB output buffer → check padding.
+
+Planned modules, each added in its milestone: `lz77.c` (M3), `crc32.c` (M5), `matcher.c` (M6), `block.c` (M7), `threads.c` (M9).
 
 ## Modules
 
@@ -36,6 +42,19 @@ Packs variable-width fields (0–32 bits) into bytes and unpacks them. Bits are 
 How the writer works: pending bits sit right-aligned in a 64-bit accumulator. Each write shifts the accumulator left by the field width and ORs the value in, then moves every complete byte (top 8 pending bits) into the buffer. Fewer than 8 bits remain pending between calls.
 
 How the reader works: to peek N bits at bit position `pos`, it loads the 5 bytes starting at `pos / 8` into a 40-bit number (bytes past the end count as 0), shifts right so the wanted field sits at the bottom, and masks it. Five bytes cover the worst case: a 32-bit field starting 7 bits into a byte.
+
+### huffman (`include/tcomp/huffman.h`, M2)
+
+Length-limited canonical Huffman coding for any alphabet up to 1024 symbols (M4 reuses it for LZ77's two alphabets). See [decision 0004](decisions/0004-huffman-design.md).
+
+| Function | Input → output | How |
+| --- | --- | --- |
+| `tcomp_huff_build_lengths` | frequencies → code lengths ≤ limit | Min-heap merges the two lightest nodes until one tree remains; leaf depth = code length. If too deep, halve all frequencies (rounding up) and rebuild. |
+| `tcomp_huff_assign_codes` | lengths → canonical codes | RFC 1951 3.2.2: count codes per length, compute the first code of each length, hand out codes in symbol order. Rejects lengths that break the Kraft inequality. |
+| `tcomp_huff_decoder_init` | lengths → lookup table | Table of 2^maxlen entries. A code of length L fills the 2^(maxlen−L) entries that begin with it, each holding `symbol << 4 \| L`. |
+| `tcomp_huff_decode_symbol` | bit reader → symbol | Peek maxlen bits, look up the entry, skip only L bits. Empty entry → corrupt; L past the end → truncated. |
+
+Why one table lookup is enough: in a prefix code no code is the start of another, so whatever bits follow a code, the first maxlen bits identify it uniquely.
 
 ## Conventions
 
@@ -55,7 +74,8 @@ How the reader works: to peek N bits at bit position `pos`, it loads the 5 bytes
 | --- | --- | --- |
 | Unit tests | `tests/unit/test_<module>.c` | Each module's functions in isolation, including error paths; exact expected bytes; seeded random roundtrips |
 | Roundtrip tests | `tests/roundtrip.sh` | `decompress(compress(x)) == x` through the real CLI, via files and pipes, on edge-case data |
-| Negative tests | `tests/roundtrip.sh` | Bad input exits with code 1, leaves no output file, triggers no sanitizer |
+| Negative tests | `tests/roundtrip.sh`, `test_container.c` | Bad input exits with code 1, leaves no output file, triggers no sanitizer; hand-built hostile files hit every decoder check |
+| Corpus | `make corpus` (`tests/corpus.sh`) | Every Canterbury corpus file round-trips with every method; prints ratios |
 | Fuzzing | `fuzz/` (M8) | The decoder survives arbitrary bytes |
 
 Debug builds run all tests under AddressSanitizer and UndefinedBehaviorSanitizer. Sanitizer failures exit with code 86 so they are never confused with a normal error.

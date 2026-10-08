@@ -4,17 +4,19 @@ on:
   push:
   pull_request:
 
+# Pinned rather than ubuntu-latest so compiler versions only change when we
+# choose to upgrade, never underneath a milestone.
 jobs:
   test:
     name: test (${{ matrix.cc }}, ${{ matrix.build }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         cc: [gcc, clang]
         build: [debug, release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install clang sanitizer runtime
         if: matrix.cc == 'clang'
         run: |
@@ -23,9 +25,17 @@ jobs:
       - name: Build and test
         run: make CC=${{ matrix.cc }} BUILD=${{ matrix.build }} test
 
-  format:
-    runs-on: ubuntu-latest
+  corpus:
+    name: corpus (Canterbury, sanitizers)
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - name: Round-trip the Canterbury corpus
+        run: make corpus
+
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
       - name: Check formatting
         run: make format-check

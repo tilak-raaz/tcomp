@@ -12,6 +12,8 @@ int main(void) {
     suite_container();
     printf("== bitio\n");
     suite_bitio();
+    printf("== huffman\n");
+    suite_huffman();
 
     printf("\n%d/%d tests passed\n", test_total - test_failed, test_total);
     return test_failed == 0 ? 0 : 1;

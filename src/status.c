@@ -18,6 +18,8 @@ const char *tcomp_strerror(tcomp_status status) {
         return "unknown compression method";
     case TCOMP_ERR_TRUNCATED:
         return "file is truncated";
+    case TCOMP_ERR_CORRUPT:
+        return "file is corrupt";
     case TCOMP_STATUS_COUNT:
         break;
     }
