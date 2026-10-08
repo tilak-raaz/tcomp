@@ -45,18 +45,35 @@ printf 'TCMP\0\0looks like a header' > "$DATA/fake_header.bin"
 # Every byte value once.
 for i in $(seq 0 255); do printf "\\$(printf '%03o' "$i")"; done > "$DATA/all_bytes.bin"
 
+size_of()   { wc -c < "$1" | tr -d ' '; }
+method_of() { od -An -tu1 -j5 -N1 "$1" | tr -d ' '; }  # header byte 5
+
 # ---- positive tests: compress -> decompress -> compare --------------------
 for f in "$DATA"/*; do
     name=$(basename "$f")
 
-    "$TCOMP" compress "$f" "$OUT/$name.tcmp" \
-        && "$TCOMP" decompress "$OUT/$name.tcmp" "$OUT/$name.restored" \
-        && cmp -s "$f" "$OUT/$name.restored" \
-        && ok "files: $name" || bad "files: $name"
+    for m in auto store huffman; do
+        "$TCOMP" compress -m "$m" "$f" "$OUT/$name.$m.tcmp" \
+            && "$TCOMP" decompress "$OUT/$name.$m.tcmp" "$OUT/$name.restored" \
+            && cmp -s "$f" "$OUT/$name.restored" \
+            && ok "files/$m: $name" || bad "files/$m: $name"
+    done
 
     "$TCOMP" compress - - < "$f" | "$TCOMP" decompress - - | cmp -s "$f" - \
         && ok "pipes: $name" || bad "pipes: $name"
+
+    # auto must never be worse than storing (input + 6-byte header).
+    [ "$(size_of "$OUT/$name.auto.tcmp")" -le $(( $(size_of "$f") + 6 )) ] \
+        && ok "auto never expands: $name" || bad "auto never expands: $name"
 done
+
+# ---- method choice --------------------------------------------------------
+[ "$(method_of "$OUT/random_1MiB.bin.auto.tcmp")" = 0 ] \
+    && ok "auto stores random data" || bad "auto stores random data"
+[ "$(method_of "$OUT/source_code.txt.auto.tcmp")" = 1 ] \
+    && ok "auto uses huffman on text" || bad "auto uses huffman on text"
+[ "$(size_of "$OUT/source_code.txt.huffman.tcmp")" -lt $(( $(size_of "$DATA/source_code.txt") * 7 / 10 )) ] \
+    && ok "huffman shrinks text below 70%" || bad "huffman shrinks text below 70%"
 
 # ---- negative tests: bad input must fail cleanly --------------------------
 # expect_fail <label> <file>: exit code must be exactly 1 and no output kept.
@@ -81,9 +98,19 @@ printf 'TCMP\143\0' > "$OUT/ver.tcmp";       expect_fail "future version"   "$OU
 printf 'TCMP\0\310' > "$OUT/method.tcmp";    expect_fail "unknown method"   "$OUT/method.tcmp"
 expect_fail "missing input file" "$OUT/does_not_exist.tcmp"
 
+GOOD="$OUT/source_code.txt.huffman.tcmp"
+head -c 100 "$GOOD" > "$OUT/h_table.tcmp";       expect_fail "huffman: cut in code table" "$OUT/h_table.tcmp"
+head -c -50 "$GOOD" > "$OUT/h_data.tcmp";        expect_fail "huffman: cut in data"       "$OUT/h_data.tcmp"
+{ cat "$GOOD"; printf 'X'; } > "$OUT/h_tail.tcmp"; expect_fail "huffman: trailing garbage" "$OUT/h_tail.tcmp"
+# Every code length 1: an impossible (oversubscribed) code.
+{ printf 'TCMP\0\001\001\0\0\0\0\0\0\0'; head -c 128 /dev/zero | tr '\0' '\021'; printf '\0'; } > "$OUT/h_lens.tcmp"
+expect_fail "huffman: impossible code lengths" "$OUT/h_lens.tcmp"
+
 # ---- CLI usage ------------------------------------------------------------
 "$TCOMP" > /dev/null 2>&1;            [ $? -eq 2 ] && ok "usage: no args exits 2" || bad "usage: no args exits 2"
 "$TCOMP" frobnicate a b > /dev/null 2>&1; [ $? -eq 2 ] && ok "usage: bad command exits 2" || bad "usage: bad command exits 2"
+"$TCOMP" compress -m bogus a b > /dev/null 2>&1; [ $? -eq 2 ] && ok "usage: unknown method exits 2" || bad "usage: unknown method exits 2"
+"$TCOMP" compress -m huffman > /dev/null 2>&1; [ $? -eq 2 ] && ok "usage: -m without files exits 2" || bad "usage: -m without files exits 2"
 "$TCOMP" --version | grep -q '^tcomp ' && ok "usage: --version" || bad "usage: --version"
 
 echo

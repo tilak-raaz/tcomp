@@ -22,7 +22,7 @@ tcomp is built in milestones. Each one ends with working code, passing tests, up
 
 - [x] M0 Setup
 - [x] M1 Bit I/O
-- [ ] M2 Huffman
+- [x] M2 Huffman
 - [ ] M3 LZ77
 - [ ] M4 LZ77 + Huffman
 - [ ] M5 `.tcmp` v1 (resume-ready)

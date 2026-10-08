@@ -26,6 +26,7 @@ extern int test_failed;
 /* One entry per tests/unit/test_<module>.c file. */
 void suite_container(void);
 void suite_bitio(void);
+void suite_huffman(void);
 
 #define TEST(name) static void name(void)
 

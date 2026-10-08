@@ -14,23 +14,41 @@
 
 enum { EXIT_OK = 0, EXIT_RUNTIME = 1, EXIT_USAGE = 2 };
 
-typedef tcomp_status (*stream_fn)(FILE *in, FILE *out);
+typedef enum { MODE_COMPRESS, MODE_DECOMPRESS } run_mode;
 
 static void print_usage(FILE *to) {
-    fputs("usage: tcomp compress   <input> <output>\n"
+    fputs("usage: tcomp compress [-m METHOD] <input> <output>\n"
           "       tcomp decompress <input> <output>\n"
           "       tcomp --version\n"
           "       tcomp --help\n"
+          "\n"
+          "METHOD is one of:\n"
+          "  auto      smallest of the methods below (default)\n"
+          "  huffman   canonical Huffman coding of bytes\n"
+          "  store     no compression\n"
           "\n"
           "Use - for <input> or <output> to read stdin or write stdout.\n",
           to);
 }
 
+static int parse_method(const char *name, tcomp_method *method) {
+    if (strcmp(name, "auto") == 0) {
+        *method = TCOMP_METHOD_AUTO;
+    } else if (strcmp(name, "huffman") == 0) {
+        *method = TCOMP_METHOD_HUFFMAN;
+    } else if (strcmp(name, "store") == 0) {
+        *method = TCOMP_METHOD_STORE;
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
 static int is_dash(const char *path) { return strcmp(path, "-") == 0; }
 
-/* Open input/output, run fn, close both. On failure, delete a partially
- * written output file so a broken result is never left behind. */
-static int run(stream_fn fn, const char *in_path, const char *out_path) {
+/* Open input/output, compress or decompress, close both. On failure, delete
+ * a partially written output file so a broken result is never left behind. */
+static int run(run_mode mode, tcomp_method method, const char *in_path, const char *out_path) {
     FILE *in = is_dash(in_path) ? stdin : fopen(in_path, "rb");
     if (in == NULL) {
         fprintf(stderr, "tcomp: cannot open '%s' for reading\n", in_path);
@@ -45,7 +63,8 @@ static int run(stream_fn fn, const char *in_path, const char *out_path) {
         return EXIT_RUNTIME;
     }
 
-    tcomp_status st = fn(in, out);
+    tcomp_status st = (mode == MODE_COMPRESS) ? tcomp_compress_stream(in, out, method)
+                                              : tcomp_decompress_stream(in, out);
 
     if (in != stdin) {
         fclose(in);
@@ -75,11 +94,20 @@ int main(int argc, char **argv) {
         print_usage(stdout);
         return EXIT_OK;
     }
-    if (argc == 4 && strcmp(argv[1], "compress") == 0) {
-        return run(tcomp_compress_stream, argv[2], argv[3]);
+    if (argc == 4 && strcmp(argv[1], "compress") == 0 && strcmp(argv[2], "-m") != 0) {
+        return run(MODE_COMPRESS, TCOMP_METHOD_AUTO, argv[2], argv[3]);
+    }
+    if (argc == 6 && strcmp(argv[1], "compress") == 0 && strcmp(argv[2], "-m") == 0) {
+        tcomp_method method;
+        if (!parse_method(argv[3], &method)) {
+            fprintf(stderr, "tcomp: unknown method '%s'\n\n", argv[3]);
+            print_usage(stderr);
+            return EXIT_USAGE;
+        }
+        return run(MODE_COMPRESS, method, argv[4], argv[5]);
     }
     if (argc == 4 && strcmp(argv[1], "decompress") == 0) {
-        return run(tcomp_decompress_stream, argv[2], argv[3]);
+        return run(MODE_DECOMPRESS, TCOMP_METHOD_AUTO, argv[2], argv[3]);
     }
     print_usage(stderr);
     return EXIT_USAGE;

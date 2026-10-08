@@ -9,7 +9,7 @@
 #ifndef TCOMP_STATUS_H
 #define TCOMP_STATUS_H
 
-#define TCOMP_VERSION_STRING "0.1.0"
+#define TCOMP_VERSION_STRING "0.2.0"
 
 typedef enum {
     TCOMP_OK = 0,          /**< Success. Always zero so `if (st)` means "failed". */
@@ -20,6 +20,7 @@ typedef enum {
     TCOMP_ERR_BAD_VERSION, /**< Format version is newer than this build understands. */
     TCOMP_ERR_BAD_METHOD,  /**< Compression method id is unknown. */
     TCOMP_ERR_TRUNCATED,   /**< Input ended before a complete structure was read. */
+    TCOMP_ERR_CORRUPT,     /**< Input is structurally invalid (e.g. impossible code lengths). */
     TCOMP_STATUS_COUNT     /**< Number of codes above. Not a real status. */
 } tcomp_status;
 
