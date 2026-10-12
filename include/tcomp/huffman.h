@@ -13,7 +13,7 @@
  * rebuilt from the lengths alone, so encoder and decoder agree on every code
  * without the tree being transmitted. See docs/decisions/0004-huffman-design.md.
  *
- * The module is alphabet-agnostic: M2 codes bytes (256 symbols), and M4 will
+ * The module is alphabet-agnostic: M2 codes bytes (256 symbols), and M5 will
  * reuse it for LZ77 literal/length and distance alphabets.
  */
 #ifndef TCOMP_HUFFMAN_H

@@ -38,5 +38,5 @@ M2 adds the first real compression: order-0 Huffman coding of bytes. Four choice
 
 - On Canterbury text files Huffman lands within 0.6–1.6% of the order-0 entropy bound. Small files lose ~6% to the fixed 142 bytes of overhead (6-byte header, 8-byte size, 128-byte length table); `ptt5`, where one byte value dominates, is 37% above the bound because Huffman cannot spend less than 1 bit per symbol. LZ77 (M3) and arithmetic coding/ANS (M10+) attack that limit.
 - The decoder rejects impossible length tables (Kraft violation), codes that map to no symbol, size fields larger than the data could hold, and non-zero padding or trailing bytes.
-- A corrupted size field can still go undetected if it changes the count by a symbol that fits in the padding bits. The CRC32 in format version 1 (M5) closes this gap.
+- A corrupted size field can still go undetected if it changes the count by a symbol that fits in the padding bits. The CRC32 in format version 1 (M6) closes this gap.
 - Compression reads the whole input into memory. Blocks (M7) remove this limit.

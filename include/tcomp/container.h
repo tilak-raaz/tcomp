@@ -20,8 +20,8 @@ typedef enum {
     TCOMP_METHOD_STORE = 0,   /**< No compression; payload is the raw input. */
     TCOMP_METHOD_HUFFMAN = 1, /**< Order-0 canonical Huffman coding of bytes. */
     TCOMP_METHOD_LZ77 = 2,    /**< LZ77 tokens in fixed-width fields (no entropy coding). */
-    TCOMP_METHOD_AUTO = 255   /**< Request only: the smaller of STORE and HUFFMAN.
-                                   Never written to a file. */
+    TCOMP_METHOD_AUTO = 255   /**< Request only: the smallest of STORE, HUFFMAN and
+                                   LZ77. Never written to a file. */
 } tcomp_method;
 
 /**
@@ -33,11 +33,10 @@ typedef enum {
  *
  * @param in     Open stream, read in binary mode. Must not be NULL.
  * @param out    Open stream, written in binary mode. Must not be NULL.
- * @param method STORE, HUFFMAN, LZ77, or AUTO (recommended). AUTO picks
- *               HUFFMAN only when it is strictly smaller than STORE, so the
+ * @param method STORE, HUFFMAN, LZ77, or AUTO (recommended). AUTO computes
+ *               the exact size every method would produce and writes the
+ *               smallest, preferring the simpler method on ties, so the
  *               output is never more than the header larger than the input.
- *               AUTO does not try LZ77 yet: its naive matcher is too slow
- *               for a default until the hash-chain matcher (M6).
  * @return TCOMP_OK, TCOMP_ERR_INVALID_ARG, TCOMP_ERR_NOMEM or TCOMP_ERR_IO.
  */
 tcomp_status tcomp_compress_stream(FILE *in, FILE *out, tcomp_method method);

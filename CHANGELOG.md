@@ -2,6 +2,24 @@
 
 All notable changes, one section per milestone tag. Newest first.
 
+## v0.4-hashchain (M4): 2026-10-08
+
+### Added
+- Hash-chain LZ77 matcher, `tcomp_lz77_parse(..., max_chain, ...)`: 3-byte multiplicative hash, `head` table and a 32 KB `prev` ring. With no chain limit its tokens are identical to the naive matcher's; the default limit is 128 candidates per position.
+- Benchmark harness (`bench/bench.c`, `make bench`, `make bench-quick`): in-process, best-of-5 timings of the naive matcher against 8 chain limits, and of every method end to end with each result verified.
+- Canterbury large set (E.coli, bible.txt, world192.txt; 11 MB) in `bench/fetch-corpus.sh`, SHA-1-verified.
+- Differential tests: hash chains vs naive on 100 random input/window combinations and on 80 KB data after the chain ring wraps. A test pinning what a chain limit counts.
+- CI job running `make bench-quick` as a smoke test.
+- Decision note 0006; matcher sweep and per-file chain analysis in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+### Changed
+- Compression uses hash chains: **205× faster than naive** at the default limit (13.7 MB/s on 14 MB), **57× faster with byte-identical output** at no limit.
+- `-m auto` now picks the smallest of STORE, HUFFMAN and LZ77 (2.93× on the benchmark set, against 2.44× for LZ77 and 2.24× for Huffman alone).
+- The naive matcher is kept as `tcomp_lz77_parse_naive()`, the reference for tests and benchmarks.
+- Roadmap reordered: hash chains moved from M6 to M4; LZ77 + Huffman is now M5 and the v1 format M6. Later tags renumbered.
+- Roundtrip script no longer skips LZ77 on 1 MiB of random data (96 checks, 3 s instead of 12 s under sanitizers); CI corpus job 3 s instead of 78 s.
+- Version string bumped to 0.4.0.
+
 ## v0.3-lz77 (M3): 2026-10-08
 
 ### Added

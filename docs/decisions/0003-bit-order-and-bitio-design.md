@@ -32,6 +32,6 @@ Further choices:
 
 ## Consequences
 
-- Hex dumps of `.tcmp` payloads are readable by hand, which helps debugging M2 and M4.
+- Hex dumps of `.tcmp` payloads are readable by hand, which helps debugging M2 and M5.
 - tcomp's bitstream is not compatible with DEFLATE's. That was never a goal.
-- The writer appends one byte at a time. That is simple and correct; M6 profiling will show whether a faster path (writing 8 bytes at once) is worth it.
+- The writer appends one byte at a time. That is simple and correct; profiling (M4 onwards) will show whether a faster path (writing 8 bytes at once) is worth it.

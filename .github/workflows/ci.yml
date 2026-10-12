@@ -33,6 +33,16 @@ jobs:
       - name: Round-trip the Canterbury corpus
         run: make corpus
 
+  # Smoke test: the benchmark builds, runs, and every result round-trips.
+  # Shared CI runners are too noisy for the timings to mean anything.
+  bench:
+    name: bench (smoke test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Quick benchmark
+        run: make bench-quick
+
   format:
     runs-on: ubuntu-24.04
     steps:

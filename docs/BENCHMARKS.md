@@ -1,6 +1,55 @@
 # Benchmarks
 
-Ratios are tracked from M2. A first speed baseline was taken in M3; the full benchmark harness arrives in M6.
+Ratios are tracked from M2, speed from M3. Since M4, `make bench` reproduces the speed tables (release build, in-process, best of 5; about 4.5 minutes because of the naive matcher, or `make bench-quick` without it).
+
+## M4: hash-chain matcher
+
+Measured 2026-10-08 with `make bench` on the Canterbury corpus plus the Canterbury large set (E.coli, bible.txt, world192.txt): 14 files, 13,970,266 bytes. Release build, gcc 13.3 `-O2`, Intel Xeon @ 2.80 GHz, one thread.
+
+**Matchers.** Greedy LZ77 parse of all 14 files; "Tokens" is the size in the LZ77 method's fixed-width format.
+
+| Matcher | Parse time | MB/s | Speedup vs naive | Tokens (bytes) | Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| naive (M3) | 209.8 s | 0.07 | 1× | 5,382,077 | 2.596 |
+| hash chain, unlimited | 3.71 s | 3.77 | **57×** | 5,382,077 | 2.596 |
+| hash chain, 1024 | 3.47 s | 4.02 | 60× | 5,383,622 | 2.595 |
+| hash chain, 256 | 1.83 s | 7.63 | 115× | 5,539,517 | 2.522 |
+| **hash chain, 128 (default)** | **1.02 s** | **13.68** | **205×** | **5,715,921** | **2.444** |
+| hash chain, 64 | 0.60 s | 23.24 | 349× | 5,938,454 | 2.353 |
+| hash chain, 16 | 0.26 s | 54.40 | 817× | 6,613,058 | 2.113 |
+| hash chain, 4 | 0.13 s | 111.18 | 1,669× | 7,790,424 | 1.793 |
+| hash chain, 1 | 0.09 s | 153.17 | 2,300× | 9,419,772 | 1.483 |
+
+**Where the chain limit costs ratio** (fixed-width LZ77 ratio by chain limit):
+
+| File | 16 | 64 | 128 | 256 | unlimited |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| alice29.txt | 1.92 | 2.05 | 2.08 | 2.09 | 2.09 |
+| lcet10.txt | 2.05 | 2.18 | 2.21 | 2.22 | 2.22 |
+| plrabn12.txt | 1.66 | 1.77 | 1.79 | 1.80 | 1.80 |
+| bible.txt | 2.29 | 2.49 | 2.54 | 2.57 | 2.59 |
+| world192.txt | 2.49 | 2.58 | 2.60 | 2.61 | 2.61 |
+| kennedy.xls | 2.96 | 2.98 | 2.98 | 2.99 | 3.00 |
+| ptt5 | 6.55 | 6.67 | 6.71 | 6.83 | 7.04 |
+| E.coli | 1.70 | 2.03 | 2.20 | 2.37 | 2.55 |
+
+**Methods end to end** (all 14 files, `tcomp_compress_stream` / `tcomp_decompress_stream` through in-memory streams, every result decompressed and compared):
+
+| Method | Compressed | Ratio | Compress MB/s | Decompress MB/s |
+| --- | ---: | ---: | ---: | ---: |
+| store | 13,970,350 | 1.000 | 1,115 | 1,143 |
+| huffman | 6,251,252 | 2.235 | 124 | 88 |
+| lz77 | 5,716,117 | 2.444 | 13.2 | 167 |
+| auto | 4,767,141 | 2.931 | 13.5 | 136 |
+
+**Analysis**
+
+- **Same output, 57× faster.** With no chain limit, hash chains produce exactly the naive matcher's tokens: every match of 3+ bytes shares its first 3 bytes, hence its hash, so skipping other positions loses nothing. The speedup is pure algorithm.
+- **The limit trades ratio for speed, unevenly.** On ordinary text, 128 candidates come within 0.5% of unlimited. Two files keep gaining: `E.coli` (4-letter alphabet, so only 64 distinct 3-byte strings and enormous chains of short matches) and `ptt5` (long zero runs, where every position hashes alike). The default, 128, is zlib's level-6 value: 205× faster than naive, 6% behind unlimited overall and 1% on the 2.8 MB Canterbury set.
+- **AUTO is now better than any single method** (2.93×): it picks Huffman for `E.coli` (2 bits per base beat LZ77's 9-bit literals) and LZ77 for text. Combining both in one stream (M5) should beat it again.
+- **Decompression is 12× faster than compression** for LZ77: the decoder only copies bytes, all the searching happens once, at compression time.
+
+## M3: LZ77 with fixed-width tokens
 
 ## M3: LZ77 with fixed-width tokens
 
@@ -33,9 +82,9 @@ Measured 2026-10-08 on the Canterbury corpus. Reproduce the size columns with `m
 
 - **LZ77 beats Huffman on every file**, 2.67× against 2.14× overall, without any entropy coding. Repeated strings carry more redundancy than skewed byte frequencies.
 - **The biggest gains are on structured data:** `fields.c` (2.50×, source code), `cp.html` (markup), `kennedy.xls` (3.00×, spreadsheet records) and `ptt5` (7.04×, long runs in a fax image, where Huffman could not go below 1 bit per byte).
-- **The smallest gain is `plrabn12.txt`** (1.80× vs 1.75×), English verse with few long repeats: there, byte frequencies are most of the redundancy, which is what Huffman captures. That is why combining both (M4) matters.
+- **The smallest gain is `plrabn12.txt`** (1.80× vs 1.75×), English verse with few long repeats: there, byte frequencies are most of the redundancy, which is what Huffman captures. That is why combining both (M5) matters.
 - **Fixed-width fields leave bits on the table.** Every literal costs 9 bits and every distance 15, however common or small. gzip, which Huffman-codes both, is still 1.44× smaller overall.
-- **The naive matcher is 280× slower than Huffman.** Compression is O(n × window): on random data every one of the 32,768 candidates is tried at every position, hence 0.04 MB/s. Decompression is fast because it only copies bytes. The hash-chain matcher (M6) targets this number.
+- **The naive matcher is 280× slower than Huffman.** Compression is O(n × window): on random data every one of the 32,768 candidates is tried at every position, hence 0.04 MB/s. Decompression is fast because it only copies bytes. The hash-chain matcher (M4, above) targets this number.
 
 ## M2: order-0 Huffman on the Canterbury corpus
 
@@ -43,7 +92,7 @@ Measured 2026-10-06 with `tcomp compress -m huffman`, gcc 13.3, `-O2`. Reproduce
 
 - **H0 bound:** the order-0 entropy of the file, ⌈n·H/8⌉ bytes. No coder that treats bytes independently can beat it.
 - **over:** how far tcomp's output, including its 142-byte header, is above that bound.
-- **gzip -9:** for context only. gzip also uses LZ77, which tcomp gets in M3–M4.
+- **gzip -9:** for context only. gzip also uses LZ77, which tcomp gets in M3–M5.
 
 | File | Size | tcomp | Ratio | H0 bound | over | gzip -9 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -65,13 +114,12 @@ Measured 2026-10-06 with `tcomp compress -m huffman`, gcc 13.3, `-O2`. Reproduce
 - **Large files are within about 1% of the entropy bound.** Huffman is optimal among codes that spend a whole number of bits per symbol; the remaining gap is that rounding.
 - **Small files pay for the header.** The 128-byte length table is 3–6% of `grammar.lsp` and `xargs.1`. A compressed length table (as DEFLATE uses) would recover most of it.
 - **`ptt5` is the outlier.** It is a fax image that is mostly zero bytes. When one symbol has probability above 1/2, its ideal code is under 1 bit, but Huffman's shortest code is 1 bit. LZ77 (M3) turns long runs into single matches; arithmetic coding or ANS (M10+) can spend fractions of a bit.
-- **gzip is 1.8× smaller overall** because LZ77 removes repeated strings, which an order-0 model cannot see. Closing that gap is the point of M3 and M4.
+- **gzip is 1.8× smaller overall** because LZ77 removes repeated strings, which an order-0 model cannot see. Closing that gap is the point of M3 to M5.
 
-## Method (from M6)
+## Method
 
-- **Corpora:** Canterbury (quick checks) and Silesia (main benchmark, about 200 MB of mixed real-world data), plus random and already-compressed files.
-- **Compared against:** `gzip -6`, `bzip2`, `xz`, `zstd -3`.
-- **Measured:** compression ratio, compression MB/s, decompression MB/s, peak memory (`/usr/bin/time -v`), and from M9 speedup and ratio loss per thread count.
-- **Fairness:** same machine, release build, best of 5 runs, input files warm in the page cache. CPU, OS, compiler and flags are recorded with every result.
+- **Now:** `make bench` (`bench/bench.c`). All inputs are loaded into memory first and every run happens in one process, so timings exclude disk and process start-up. Each figure is the best of 5 runs (the naive and unlimited matchers: 1 run). Release build. CPU, compiler and flags are recorded with every table.
+- **Corpora:** Canterbury (2.8 MB) and Canterbury large (11 MB), downloaded and SHA-1-verified by `bench/fetch-corpus.sh`. Silesia (about 200 MB) is planned for the v1.0 comparison.
+- **Planned comparisons:** `gzip -6`, `bzip2`, `xz`, `zstd -3` on the same machine; peak memory (`/usr/bin/time -v`); from M9, speedup and ratio loss per thread count.
 
 The goal is not to beat these tools but to explain why tcomp is faster or slower and compresses better or worse.

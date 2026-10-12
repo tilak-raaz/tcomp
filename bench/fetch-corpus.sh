@@ -4,6 +4,8 @@
 # The corpus (https://corpus.canterbury.ac.nz) is the standard small benchmark
 # for lossless compressors: 11 files, 2.8 MB, mixing English text, HTML, C and
 # Lisp source, a man page, a spreadsheet, a fax image and a SPARC binary.
+# The "large" set adds three bigger files (11 MB) for stable speed numbers:
+# a genome, the King James Bible and the CIA World Factbook.
 #
 # It is fetched from a git mirror pinned to an exact commit, and every file is
 # checked against the SHA-1 below (file sizes match the official corpus).
@@ -14,8 +16,9 @@ set -euo pipefail
 REPO=https://github.com/pfalcon/canterbury-corpus.git
 COMMIT=c380ef9dc1dc62691757fdfeebdc2f85710e1e46
 DEST=bench/corpus
+MARKER="$DEST/.verified-v2-$COMMIT" # v2: also verifies the large set
 
-if [ -f "$DEST/.verified-$COMMIT" ]; then
+if [ -f "$MARKER" ]; then
     exit 0
 fi
 
@@ -39,5 +42,11 @@ bb3c73adde28228f9a311ddfee8f76aeccf83c4b  kennedy.xls
 777250a5ccf4fd95b48c1c9248ab82c2e0221913  xargs.1
 EOF
 
-touch "$DEST/.verified-$COMMIT"
+(cd "$DEST/large" && sha1sum --quiet -c -) <<'EOF'
+bea54298e17d5ef86ddb75ac71b5b74fadf2cb7d  E.coli
+e8302ab252ebf3d391d7072cf8957a6cd77667d9  bible.txt
+fe5b97b714b2abe91a5e64f4e9b4589f61a6a45e  world192.txt
+EOF
+
+touch "$MARKER"
 echo "Canterbury corpus verified."

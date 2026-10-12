@@ -4,7 +4,7 @@ This document specifies every byte of a `.tcmp` file. It should be precise enoug
 
 Conventions: offsets and sizes are in bytes. Multi-byte integers are **little-endian**. Bit-packed data is **MSB-first**: the first bit of the stream is the most significant bit (0x80) of the first byte, and each multi-bit field is stored from its most significant bit down. A bitstream ends with 0 bits padding it to a whole byte.
 
-## Version 0 (current, M0–M3)
+## Version 0 (current, M0–M4)
 
 Version 0 is a minimal container used while the real codec is built.
 
@@ -23,7 +23,7 @@ Version 0 is a minimal container used while the real codec is built.
 | 1 | HUFFMAN | M2 | Order-0 canonical Huffman coding of bytes (below) |
 | 2 | LZ77 | M3 | LZ77 tokens in fixed-width fields (below) |
 
-All other method ids are reserved. The CLI's `-m auto` is not a method id: it chooses STORE or HUFFMAN, whichever is smaller (LZ77 joins once its matcher is fast, M6).
+All other method ids are reserved. The CLI's `-m auto` is not a method id: it chooses whichever of STORE, HUFFMAN and LZ77 gives the smallest file.
 
 ### HUFFMAN payload (method 1)
 
@@ -94,13 +94,13 @@ For LZ77, after rule 4:
 
 ### Known limitations of version 0
 
-- No checksum. A STORE file truncated inside its payload cannot be detected, and some single-bit corruptions of HUFFMAN or LZ77 data decode to wrong output without error. Version 1 (M5) adds a CRC32.
+- No checksum. A STORE file truncated inside its payload cannot be detected, and some single-bit corruptions of HUFFMAN or LZ77 data decode to wrong output without error. Version 1 (M6) adds a CRC32.
 - HUFFMAN and LZ77 compression read the whole input into memory. Blocks (M7) remove this.
-- LZ77's fixed-width fields are deliberately simple; M4 replaces them with Huffman codes.
+- LZ77's fixed-width fields are deliberately simple; M5 replaces them with Huffman codes.
 
 ## Planned changes
 
 | Version | Milestone | Adds |
 | --- | --- | --- |
-| 1 | M5 | Original size and CRC32 in the header, LZ77+Huffman method, `info` command |
+| 1 | M6 | Original size and CRC32 in the header, LZ77+Huffman method, `info` command |
 | 1 + blocks | M7 | Block structure for streaming and parallelism |

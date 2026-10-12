@@ -23,9 +23,9 @@ static void print_usage(FILE *to) {
           "       tcomp --help\n"
           "\n"
           "METHOD is one of:\n"
-          "  auto      smaller of huffman and store (default)\n"
+          "  auto      smallest of the methods below (default)\n"
           "  huffman   canonical Huffman coding of bytes\n"
-          "  lz77      LZ77 back-references (slow: naive matcher until M6)\n"
+          "  lz77      LZ77 back-references, hash-chain matcher\n"
           "  store     no compression\n"
           "\n"
           "Use - for <input> or <output> to read stdin or write stdout.\n",
