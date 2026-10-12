@@ -7,6 +7,7 @@
 #include "tcomp/bitio.h"
 #include "tcomp/huffman.h"
 #include "tcomp/lz77.h"
+#include "tcomp/lzh.h"
 
 /* Layout (docs/FORMAT.md, version 0):
  *   header   magic "TCMP" (4) | format version (1) | method id (1)
@@ -16,6 +17,9 @@
  *            then 0-7 zero bits of padding
  *   LZ77     original size, uint64 little-endian (8)
  *            bitstream: tokens (9-bit literals, 24-bit matches), then
+ *            0-7 zero bits of padding
+ *   LZH      original size, uint64 little-endian (8)
+ *            bitstream: code tables, Huffman-coded tokens (src/lzh.c), then
  *            0-7 zero bits of padding
  */
 enum {
@@ -227,13 +231,32 @@ static tcomp_status write_lz77(const tcomp_lz77_tokens *tokens, size_t len, FILE
     return st;
 }
 
+static tcomp_status write_lzh(const tcomp_lzh_encoder *enc, const tcomp_lz77_tokens *tokens,
+                              size_t len, FILE *out) {
+    tcomp_bitwriter bw;
+    tcomp_status st = tcomp_bw_init(&bw, (size_t)((enc->bits + 7) / 8) + 1);
+    if (st == TCOMP_OK) {
+        st = tcomp_lzh_write(enc, tokens->items, tokens->count, &bw);
+    }
+    if (st == TCOMP_OK) {
+        st = tcomp_bw_flush(&bw);
+    }
+    if (st == TCOMP_OK) {
+        st = write_sized_payload(out, TCOMP_METHOD_LZH, len, &bw);
+    }
+    tcomp_bw_free(&bw);
+    return st;
+}
+
 /* Run the requested method, or for AUTO every method, and write the result.
  * Payload sizes are computed exactly before anything is written, so AUTO
- * never encodes twice: it plans HUFFMAN and parses LZ77, then writes the
- * smallest, preferring the simpler method on ties. */
+ * never encodes twice: it plans HUFFMAN, parses LZ77 once (LZ77 and LZH
+ * share the tokens), plans LZH, then writes the smallest, preferring the
+ * simpler method on ties. */
 static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_method method,
                                     FILE *out) {
     huffman_plan plan;
+    tcomp_lzh_encoder lzh;
     tcomp_lz77_tokens tokens;
     tcomp_lz77_tokens_init(&tokens);
     tcomp_status st = TCOMP_OK;
@@ -248,12 +271,24 @@ static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_metho
             chosen = TCOMP_METHOD_HUFFMAN;
         }
     }
-    if (st == TCOMP_OK && (method == TCOMP_METHOD_LZ77 || method == TCOMP_METHOD_AUTO)) {
+    int wants_lz77 = method == TCOMP_METHOD_LZ77 || method == TCOMP_METHOD_AUTO;
+    int wants_lzh = method == TCOMP_METHOD_LZH || method == TCOMP_METHOD_AUTO;
+    if (st == TCOMP_OK && (wants_lz77 || wants_lzh)) {
         st = tcomp_lz77_parse(data, len, TCOMP_LZ77_WINDOW, TCOMP_LZ77_DEFAULT_CHAIN, &tokens);
+    }
+    if (st == TCOMP_OK && wants_lz77) {
         uint64_t size = SIZE_FIELD + (lz77_bits(&tokens) + 7) / 8;
-        if (st == TCOMP_OK && (method == TCOMP_METHOD_LZ77 || size < best)) {
+        if (method == TCOMP_METHOD_LZ77 || size < best) {
             best = size;
             chosen = TCOMP_METHOD_LZ77;
+        }
+    }
+    if (st == TCOMP_OK && wants_lzh) {
+        st = tcomp_lzh_plan(tokens.items, tokens.count, &lzh);
+        uint64_t size = SIZE_FIELD + (lzh.bits + 7) / 8;
+        if (st == TCOMP_OK && (method == TCOMP_METHOD_LZH || size < best)) {
+            best = size;
+            chosen = TCOMP_METHOD_LZH;
         }
     }
 
@@ -264,6 +299,9 @@ static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_metho
             break;
         case TCOMP_METHOD_LZ77:
             st = write_lz77(&tokens, len, out);
+            break;
+        case TCOMP_METHOD_LZH:
+            st = write_lzh(&lzh, &tokens, len, out);
             break;
         default:
             st = write_header(out, TCOMP_METHOD_STORE);
@@ -286,7 +324,7 @@ tcomp_status tcomp_compress_stream(FILE *in, FILE *out, tcomp_method method) {
         return st != TCOMP_OK ? st : copy_stream(in, out);
     }
     if (method != TCOMP_METHOD_HUFFMAN && method != TCOMP_METHOD_LZ77 &&
-        method != TCOMP_METHOD_AUTO) {
+        method != TCOMP_METHOD_LZH && method != TCOMP_METHOD_AUTO) {
         return TCOMP_ERR_INVALID_ARG;
     }
 
@@ -362,9 +400,12 @@ static tcomp_status decode_huffman_payload(const uint8_t *payload, size_t len, u
     return st;
 }
 
-/* Read one LZ77 token: returns its length and fills *literal or *distance. */
-static tcomp_status read_lz77_token(tcomp_bitreader *br, unsigned *length, unsigned *distance,
-                                    uint8_t *literal) {
+/* Reads the next token from a bitstream; ctx is reader-specific state. */
+typedef tcomp_status (*token_reader)(void *ctx, tcomp_bitreader *br, tcomp_lz77_token *token);
+
+/* LZ77 method: flag bit, then 8-bit literal or 8-bit length + 15-bit distance. */
+static tcomp_status read_lz77_token(void *ctx, tcomp_bitreader *br, tcomp_lz77_token *token) {
+    (void)ctx;
     uint32_t flag, v;
     tcomp_status st = tcomp_br_read_bits(br, 1, &flag);
     if (st != TCOMP_OK) {
@@ -372,39 +413,40 @@ static tcomp_status read_lz77_token(tcomp_bitreader *br, unsigned *length, unsig
     }
     if (flag == 0) {
         st = tcomp_br_read_bits(br, 8, &v);
-        *literal = (uint8_t)v;
-        *length = 1;
-        *distance = 0;
+        token->length = (uint16_t)v;
+        token->distance = 0;
         return st;
     }
     st = tcomp_br_read_bits(br, LZ_LENGTH_BITS, &v);
     if (st != TCOMP_OK) {
         return st;
     }
-    *length = v + TCOMP_LZ77_MIN_MATCH;
+    token->length = (uint16_t)(v + TCOMP_LZ77_MIN_MATCH);
     st = tcomp_br_read_bits(br, LZ_DISTANCE_BITS, &v);
-    *distance = v + 1;
+    token->distance = (uint16_t)(v + 1);
     return st;
 }
 
-/* Decode LZ77 tokens straight to `out`, keeping only the last 32 KB of
+/* LZH method: Huffman-coded symbols with extra bits. */
+static tcomp_status read_lzh_token(void *ctx, tcomp_bitreader *br, tcomp_lz77_token *token) {
+    return tcomp_lzh_read_token((const tcomp_lzh_decoder *)ctx, br, token);
+}
+
+/* Expand tokens from `br` straight to `out`, keeping only the last 32 KB of
  * output in memory: memory use is constant no matter what `size` claims.
+ * Shared by every LZ77-based method; only the token reader differs.
  *
  * buf holds [already written | not yet written]; when a token would not
  * fit, the unwritten part is flushed and the newest WINDOW bytes (all a
- * match can reach) slide to the front. */
-static tcomp_status decode_lz77_payload(const uint8_t *payload, size_t len, uint64_t size,
-                                        FILE *out) {
-    tcomp_bitreader br;
-    tcomp_status st = tcomp_br_init(&br, payload, len);
-    if (st != TCOMP_OK) {
-        return st;
-    }
-    /* Each token takes at least 9 bits and produces at most 258 bytes. */
-    if (size > (uint64_t)(tcomp_br_bits_remaining(&br) / LZ_LITERAL_BITS) * TCOMP_LZ77_MAX_MATCH) {
+ * match can reach) slide to the front.
+ *
+ * min_token_bits is the smallest possible token, used to reject a size
+ * field no bitstream of this length could satisfy before doing any work. */
+static tcomp_status expand_tokens(tcomp_bitreader *br, uint64_t size, unsigned min_token_bits,
+                                  token_reader read_token, void *ctx, FILE *out) {
+    if (size > (uint64_t)(tcomp_br_bits_remaining(br) / min_token_bits) * TCOMP_LZ77_MAX_MATCH) {
         return TCOMP_ERR_TRUNCATED;
     }
-
     enum { BUF = TCOMP_LZ77_WINDOW + COPY_CHUNK };
     uint8_t *buf = malloc(BUF);
     if (buf == NULL) {
@@ -412,15 +454,16 @@ static tcomp_status decode_lz77_payload(const uint8_t *payload, size_t len, uint
     }
     size_t pos = 0, flushed = 0;
     uint64_t produced = 0;
+    tcomp_status st = TCOMP_OK;
 
     while (produced < size && st == TCOMP_OK) {
-        unsigned length, distance;
-        uint8_t literal = 0;
-        st = read_lz77_token(&br, &length, &distance, &literal);
+        tcomp_lz77_token tok;
+        st = read_token(ctx, br, &tok);
         if (st != TCOMP_OK) {
             break;
         }
-        if (distance > produced || length > size - produced) {
+        unsigned length = tok.distance == 0 ? 1 : tok.length;
+        if (tok.distance > produced || length > size - produced) {
             st = TCOMP_ERR_CORRUPT; /* reaches before the start, or past the end */
             break;
         }
@@ -429,23 +472,50 @@ static tcomp_status decode_lz77_payload(const uint8_t *payload, size_t len, uint
             memmove(buf, buf + pos - TCOMP_LZ77_WINDOW, TCOMP_LZ77_WINDOW);
             pos = flushed = TCOMP_LZ77_WINDOW;
         }
-        if (distance == 0) {
-            buf[pos++] = literal;
+        if (tok.distance == 0) {
+            buf[pos++] = (uint8_t)tok.length;
         } else {
             for (unsigned k = 0; k < length; k++, pos++) { /* may overlap: byte by byte */
-                buf[pos] = buf[pos - distance];
+                buf[pos] = buf[pos - tok.distance];
             }
         }
         produced += length;
     }
 
     if (st == TCOMP_OK) {
-        st = check_padding(&br);
+        st = check_padding(br);
     }
     if (st == TCOMP_OK) {
         st = write_all(out, buf + flushed, pos - flushed);
     }
     free(buf);
+    return st;
+}
+
+static tcomp_status decode_lz77_payload(const uint8_t *payload, size_t len, uint64_t size,
+                                        FILE *out) {
+    tcomp_bitreader br;
+    tcomp_status st = tcomp_br_init(&br, payload, len);
+    if (st != TCOMP_OK) {
+        return st;
+    }
+    return expand_tokens(&br, size, LZ_LITERAL_BITS, read_lz77_token, NULL, out);
+}
+
+static tcomp_status decode_lzh_payload(const uint8_t *payload, size_t len, uint64_t size,
+                                       FILE *out) {
+    tcomp_bitreader br;
+    tcomp_status st = tcomp_br_init(&br, payload, len);
+    if (st != TCOMP_OK) {
+        return st;
+    }
+    tcomp_lzh_decoder dec;
+    st = tcomp_lzh_read_header(&br, &dec);
+    if (st == TCOMP_OK) {
+        /* A token's codes can be as short as 1 bit (e.g. a single symbol). */
+        st = expand_tokens(&br, size, 1, read_lzh_token, &dec, out);
+    }
+    tcomp_lzh_decoder_free(&dec);
     return st;
 }
 
@@ -502,6 +572,8 @@ tcomp_status tcomp_decompress_stream(FILE *in, FILE *out) {
         return decompress_sized(in, out, decode_huffman_payload);
     case TCOMP_METHOD_LZ77:
         return decompress_sized(in, out, decode_lz77_payload);
+    case TCOMP_METHOD_LZH:
+        return decompress_sized(in, out, decode_lzh_payload);
     default:
         return TCOMP_ERR_BAD_METHOD;
     }

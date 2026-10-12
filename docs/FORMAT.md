@@ -4,7 +4,7 @@ This document specifies every byte of a `.tcmp` file. It should be precise enoug
 
 Conventions: offsets and sizes are in bytes. Multi-byte integers are **little-endian**. Bit-packed data is **MSB-first**: the first bit of the stream is the most significant bit (0x80) of the first byte, and each multi-bit field is stored from its most significant bit down. A bitstream ends with 0 bits padding it to a whole byte.
 
-## Version 0 (current, M0–M4)
+## Version 0 (current, M0–M5)
 
 Version 0 is a minimal container used while the real codec is built.
 
@@ -22,8 +22,9 @@ Version 0 is a minimal container used while the real codec is built.
 | 0 | STORE | M0 | The original data, unchanged, up to end of file |
 | 1 | HUFFMAN | M2 | Order-0 canonical Huffman coding of bytes (below) |
 | 2 | LZ77 | M3 | LZ77 tokens in fixed-width fields (below) |
+| 3 | LZH | M5 | LZ77 tokens Huffman-coded, DEFLATE-style (below) |
 
-All other method ids are reserved. The CLI's `-m auto` is not a method id: it chooses whichever of STORE, HUFFMAN and LZ77 gives the smallest file.
+All other method ids are reserved. The CLI's `-m auto` is not a method id: it chooses whichever method gives the smallest file.
 
 ### HUFFMAN payload (method 1)
 
@@ -66,6 +67,52 @@ Example: the tokens `0 'a'`, `0 'b'`, `1 (length 7, distance 2)` decode to `abab
 
 Tokens continue until exactly *n* bytes have been produced.
 
+### LZH payload (method 3)
+
+| Offset in payload | Size | Field |
+| --- | --- | --- |
+| 0 | 8 | Original size *n* in bytes, unsigned little-endian |
+| 8 | rest of file | Bitstream |
+
+The bitstream has the structure of an RFC 1951 dynamic-Huffman block, written MSB-first. Tokens have the same meaning as in the LZ77 method.
+
+**1. Counts**
+
+| Bits | Field | Meaning |
+| --- | --- | --- |
+| 5 | HLIT | Literal/length code lengths sent, minus 257 (valid: 0–29, so 257–286) |
+| 5 | HDIST | Distance code lengths sent, minus 1 (valid: 0–29, so 1–30) |
+| 4 | HCLEN | Code-length code lengths sent, minus 4 (4–19) |
+
+**2. Code-length code.** HCLEN + 4 fields of 3 bits: the code lengths (0–7) of code-length symbols in the order `16 17 18 0 8 7 9 6 10 5 11 4 12 3 13 2 14 1 15`. Symbols not sent have length 0. Codes are assigned canonically, as for HUFFMAN.
+
+**3. Code lengths.** HLIT + HDIST lengths, literal/length table first, then distance table, as one sequence of code-length symbols (a run may cross from one table to the other). Each symbol is followed by its extra bits:
+
+| Symbol | Extra bits | Meaning |
+| --- | --- | --- |
+| 0–15 | 0 | This code length |
+| 16 | 2 | Repeat the previous length 3 + extra times (3–6) |
+| 17 | 3 | 3 + extra zeros (3–10) |
+| 18 | 7 | 11 + extra zeros (11–138) |
+
+Lengths beyond those sent are 0. Both codes are then assigned canonically. Maximum code length: 15.
+
+**4. Tokens.** Each token starts with a literal/length code:
+
+| Symbol | Meaning |
+| --- | --- |
+| 0–255 | Literal byte |
+| 256 | Reserved, invalid |
+| 257–285 | Match: length = base + extra bits (table below), then a distance code |
+
+Length symbols (base length, extra bits): 257–264 → 3–10 (0); 265–268 → 11, 13, 15, 17 (1); 269–272 → 19, 23, 27, 31 (2); 273–276 → 35, 43, 51, 59 (3); 277–280 → 67, 83, 99, 115 (4); 281–284 → 131, 163, 195, 227 (5); 285 → 258 (0).
+
+Distance symbols (base distance, extra bits): 0–3 → 1–4 (0); then pairs of symbols per extra-bit count *k* = 1…13, with bases 5, 7 (1); 9, 13 (2); 17, 25 (3); 33, 49 (4); 65, 97 (5); 129, 193 (6); 257, 385 (7); 513, 769 (8); 1025, 1537 (9); 2049, 3073 (10); 4097, 6145 (11); 8193, 12289 (12); 16385, 24577 (13). Symbols 28–29 cover 16385–32768.
+
+Extra bits are an unsigned number of the stated width, MSB-first, added to the base. Example: length 13 is symbol 266 followed by extra bit `0`; distance 6 is symbol 4 followed by extra bit `1`.
+
+**5. Padding:** 0–7 zero bits.
+
 ### Decoder rules
 
 A decoder must check, in this order:
@@ -92,11 +139,21 @@ For LZ77, after rule 4:
 9. The data does not end inside a token → otherwise *truncated*.
 10. After *n* bytes, fewer than 8 bits remain and all of them are 0 → otherwise *corrupt*.
 
+For LZH, after rule 4:
+
+5. The size field and all header fields are present → otherwise *truncated*.
+6. HLIT ≤ 286 and HDIST ≤ 30 → otherwise *corrupt*.
+7. The code-length code, and the literal/length and distance codes, satisfy the Kraft inequality → otherwise *corrupt*.
+8. Symbol 16 does not come first; no run goes past HLIT + HDIST lengths → otherwise *corrupt*.
+9. *n* ≤ bits remaining × 258, since every token is at least 1 bit and produces at most 258 bytes → otherwise *truncated*. Checked before any output is written.
+10. Every code read matches a symbol, and symbol 256 never appears → otherwise *corrupt*.
+11. Rules 7–10 of LZ77 (distance within output, length within *n*, no truncated token, zero padding).
+
 ### Known limitations of version 0
 
-- No checksum. A STORE file truncated inside its payload cannot be detected, and some single-bit corruptions of HUFFMAN or LZ77 data decode to wrong output without error. Version 1 (M6) adds a CRC32.
-- HUFFMAN and LZ77 compression read the whole input into memory. Blocks (M7) remove this.
-- LZ77's fixed-width fields are deliberately simple; M5 replaces them with Huffman codes.
+- No checksum. A STORE file truncated inside its payload cannot be detected, and some single-bit corruptions of HUFFMAN, LZ77 or LZH data decode to wrong output without error. Version 1 (M6) adds a CRC32.
+- HUFFMAN, LZ77 and LZH compression read the whole input into memory, and LZH uses one set of tables for the whole file. Blocks (M7) remove both limits.
+- LZ77's fixed-width fields are deliberately simple; LZH (method 3) replaces them with Huffman codes.
 
 ## Planned changes
 

@@ -198,6 +198,7 @@ static void bench_methods(const input *inputs, int count, size_t total, int quic
     } methods[] = {{"store", TCOMP_METHOD_STORE},
                    {"huffman", TCOMP_METHOD_HUFFMAN},
                    {"lz77", TCOMP_METHOD_LZ77},
+                   {"lzh", TCOMP_METHOD_LZH},
                    {"auto", TCOMP_METHOD_AUTO}};
     int reps = quick ? 2 : 5;
 

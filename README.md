@@ -4,7 +4,7 @@ A lossless file compressor written from scratch in C11.
 
 tcomp is being built milestone by milestone toward an LZ77 + canonical Huffman compressor (the same family as gzip/DEFLATE) with its own checksummed `.tcmp` file format, streaming I/O, multithreaded block compression, a benchmark suite and fuzz testing. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and current status.
 
-> **Status: M4 (hash chains) complete.** tcomp picks the best of canonical Huffman coding and LZ77 for each file (2.93× on the 14 MB Canterbury benchmark set). A hash-chain matcher makes LZ77 205× faster than the naive version. M5 combines LZ77 and Huffman, DEFLATE-style.
+> **Status: M5 (LZ77 + Huffman) complete.** tcomp compresses DEFLATE-style: LZ77 back-references from a hash-chain matcher, Huffman-coded with two alphabets. **3.58× on the Canterbury corpus**, within 7% of gzip -9. Next: the v1.0 file format with CRC32 (M6).
 
 ## Build
 
@@ -31,7 +31,7 @@ sudo apt install "libclang-rt-$(clang -dumpversion | cut -d. -f1)-dev"   # sanit
 
 ```sh
 tcomp compress   input.txt  output.tcmp     # picks the smallest method
-tcomp compress -m lz77 input.txt out.tcmp     # force a method: auto | huffman | lz77 | store
+tcomp compress -m lzh input.txt out.tcmp      # force a method: auto | lzh | lz77 | huffman | store
 tcomp decompress output.tcmp restored.txt     # method is read from the file
 tcomp --version
 
@@ -64,15 +64,16 @@ docs/            roadmap, format spec, design, benchmarks, decision notes
 
 ## Benchmarks
 
-14 files, 13,970,266 bytes (Canterbury + Canterbury large), one thread, Intel Xeon @ 2.80 GHz:
+Canterbury corpus (11 files, 2,810,784 bytes):
 
-| | Ratio | Compress | Decompress |
-| --- | ---: | ---: | ---: |
-| Huffman | 2.24× | 124 MB/s | 88 MB/s |
-| LZ77, hash chains (default) | 2.44× | 13.2 MB/s | 167 MB/s |
-| auto (best per file) | **2.93×** | 13.5 MB/s | 136 MB/s |
+| | Size | Ratio |
+| --- | ---: | ---: |
+| Huffman | 1,313,970 | 2.14× |
+| LZ77 | 1,063,157 | 2.64× |
+| **LZH (LZ77 + Huffman)** | **785,259** | **3.58×** |
+| gzip -6 / -9 | 733,769 / 730,732 | 3.83× / 3.85× |
 
-The hash-chain matcher is 205× faster than the naive O(n × window) matcher it replaced, and 57× faster with byte-identical output when its chain is unlimited. Full tables and analysis in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Speed on 14 files, 13,970,266 bytes (Canterbury + Canterbury large), one thread, Intel Xeon @ 2.80 GHz: LZH compresses at about 11 MB/s and decompresses at about 110 MB/s. The hash-chain matcher is 205× faster than the naive matcher it replaced. Full tables and analysis in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## License
 

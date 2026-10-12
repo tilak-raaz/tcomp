@@ -53,7 +53,7 @@ method_of() { od -An -tu1 -j5 -N1 "$1" | tr -d ' '; }  # header byte 5
 for f in "$DATA"/*; do
     name=$(basename "$f")
 
-    for m in auto store huffman lz77; do
+    for m in auto store huffman lz77 lzh; do
         "$TCOMP" compress -m "$m" "$f" "$OUT/$name.$m.tcmp" \
             && "$TCOMP" decompress "$OUT/$name.$m.tcmp" "$OUT/$name.restored" \
             && cmp -s "$f" "$OUT/$name.restored" \
@@ -71,14 +71,16 @@ done
 # ---- method choice --------------------------------------------------------
 [ "$(method_of "$OUT/random_1MiB.bin.auto.tcmp")" = 0 ] \
     && ok "auto stores random data" || bad "auto stores random data"
-[ "$(method_of "$OUT/source_code.txt.auto.tcmp")" = 2 ] \
-    && ok "auto uses lz77 on source code" || bad "auto uses lz77 on source code"
+[ "$(method_of "$OUT/source_code.txt.auto.tcmp")" = 3 ] \
+    && ok "auto uses lzh on source code" || bad "auto uses lzh on source code"
 [ "$(size_of "$OUT/source_code.txt.huffman.tcmp")" -lt $(( $(size_of "$DATA/source_code.txt") * 7 / 10 )) ] \
     && ok "huffman shrinks text below 70%" || bad "huffman shrinks text below 70%"
 [ "$(size_of "$OUT/zeros_1MiB.bin.lz77.tcmp")" -lt 20000 ] \
     && ok "lz77 shrinks 1 MiB of zeros below 20 KB" || bad "lz77 shrinks 1 MiB of zeros below 20 KB"
 [ "$(size_of "$OUT/source_code.txt.lz77.tcmp")" -lt "$(size_of "$OUT/source_code.txt.huffman.tcmp")" ] \
     && ok "lz77 beats huffman on source code" || bad "lz77 beats huffman on source code"
+[ "$(size_of "$OUT/source_code.txt.lzh.tcmp")" -lt "$(size_of "$OUT/source_code.txt.lz77.tcmp")" ] \
+    && ok "lzh beats lz77 on source code" || bad "lzh beats lz77 on source code"
 
 # ---- negative tests: bad input must fail cleanly --------------------------
 # expect_fail <label> <file>: exit code must be exactly 1 and no output kept.
@@ -114,6 +116,11 @@ expect_fail "huffman: impossible code lengths" "$OUT/h_lens.tcmp"
 GOOD="$OUT/source_code.txt.lz77.tcmp"
 head -c -20 "$GOOD" > "$OUT/l_data.tcmp";          expect_fail "lz77: cut in data"       "$OUT/l_data.tcmp"
 { cat "$GOOD"; printf 'X'; } > "$OUT/l_tail.tcmp"; expect_fail "lz77: trailing garbage" "$OUT/l_tail.tcmp"
+GOOD="$OUT/source_code.txt.lzh.tcmp"
+head -c 30 "$GOOD" > "$OUT/z_head.tcmp";           expect_fail "lzh: cut in code tables" "$OUT/z_head.tcmp"
+head -c -20 "$GOOD" > "$OUT/z_data.tcmp";          expect_fail "lzh: cut in data"        "$OUT/z_data.tcmp"
+{ cat "$GOOD"; printf 'X'; } > "$OUT/z_tail.tcmp"; expect_fail "lzh: trailing garbage"   "$OUT/z_tail.tcmp"
+
 # size 3, then a match (flag 1) before any literal: reaches before the start.
 printf 'TCMP\0\002\003\0\0\0\0\0\0\0\200\0\0' > "$OUT/l_early.tcmp"
 expect_fail "lz77: match before any output" "$OUT/l_early.tcmp"

@@ -25,7 +25,8 @@ static void print_usage(FILE *to) {
           "METHOD is one of:\n"
           "  auto      smallest of the methods below (default)\n"
           "  huffman   canonical Huffman coding of bytes\n"
-          "  lz77      LZ77 back-references, hash-chain matcher\n"
+          "  lzh       LZ77 + Huffman, DEFLATE-style (best ratio)\n"
+          "  lz77      LZ77 back-references in fixed-width fields\n"
           "  store     no compression\n"
           "\n"
           "Use - for <input> or <output> to read stdin or write stdout.\n",
@@ -37,6 +38,8 @@ static int parse_method(const char *name, tcomp_method *method) {
         *method = TCOMP_METHOD_AUTO;
     } else if (strcmp(name, "huffman") == 0) {
         *method = TCOMP_METHOD_HUFFMAN;
+    } else if (strcmp(name, "lzh") == 0) {
+        *method = TCOMP_METHOD_LZH;
     } else if (strcmp(name, "lz77") == 0) {
         *method = TCOMP_METHOD_LZ77;
     } else if (strcmp(name, "store") == 0) {
