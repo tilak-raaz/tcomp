@@ -13,8 +13,8 @@
  * proceeds byte by byte, so a short pattern repeats, like run-length coding.
  *
  * This module only turns bytes into tokens and back. How tokens are packed
- * into bits is the container's job: fixed-width fields in M3, Huffman codes
- * in M4. See docs/decisions/0005-lz77-design.md.
+ * into bits is the container's job: fixed-width fields in M3-M4, Huffman codes
+ * in M5. See docs/decisions/0005-lz77-design.md.
  */
 #ifndef TCOMP_LZ77_H
 #define TCOMP_LZ77_H
@@ -47,24 +47,53 @@ void tcomp_lz77_tokens_init(tcomp_lz77_tokens *tokens);
 /** @brief Release the array. Safe to call twice. */
 void tcomp_lz77_tokens_free(tcomp_lz77_tokens *tokens);
 
+/** Pass as max_chain to tcomp_lz77_parse() to search every candidate. */
+#define TCOMP_LZ77_UNLIMITED_CHAIN 0u
+
 /**
- * @brief Split @p data into tokens with greedy parsing and a naive matcher.
+ * Default max_chain: candidates tried per position. Chosen from the
+ * ratio/speed sweep in docs/BENCHMARKS.md (M4).
+ */
+#define TCOMP_LZ77_DEFAULT_CHAIN 128u
+
+/**
+ * @brief Split @p data into tokens: greedy parsing, hash-chain matcher.
  *
- * At each position, every earlier position within the window is tried and
- * the longest match wins (the nearest one on ties); if it is at least 3
- * bytes it is emitted and skipped over, otherwise one literal is emitted.
- * This costs O(n x window) time: simple and obviously correct, and the
- * baseline that the hash-chain matcher in M6 is measured against.
+ * Every position is indexed by a hash of the 3 bytes starting there. To find
+ * a match, only earlier positions with the same hash are tried, nearest
+ * first, following a chain of links; any match of 3 or more bytes must start
+ * with the same 3 bytes, so no useful candidate is skipped. The longest
+ * match wins (the nearest on ties); if it is at least 3 bytes it is emitted,
+ * otherwise one literal.
  *
- * @param data   Input bytes. May be NULL only if @p len is 0.
- * @param len    Input length.
- * @param window How far back to search, 1 to TCOMP_LZ77_WINDOW. Smaller
- *               windows are faster and are used by tests.
- * @param tokens Initialised array; tokens are appended to it.
+ * With @p max_chain = TCOMP_LZ77_UNLIMITED_CHAIN the tokens are identical to
+ * tcomp_lz77_parse_naive(). A limit trades a little compression for a
+ * bounded amount of work per position.
+ *
+ * @param data      Input bytes. May be NULL only if @p len is 0.
+ * @param len       Input length.
+ * @param window    How far back to search, 1 to TCOMP_LZ77_WINDOW.
+ * @param max_chain Candidates tried per position at most, or
+ *                  TCOMP_LZ77_UNLIMITED_CHAIN.
+ * @param tokens    Initialised array; tokens are appended to it.
  * @return TCOMP_OK, TCOMP_ERR_INVALID_ARG or TCOMP_ERR_NOMEM.
  */
-tcomp_status tcomp_lz77_parse(const uint8_t *data, size_t len, size_t window,
+tcomp_status tcomp_lz77_parse(const uint8_t *data, size_t len, size_t window, size_t max_chain,
                               tcomp_lz77_tokens *tokens);
+
+/**
+ * @brief Reference parser: greedy parsing with a naive matcher.
+ *
+ * At each position, every earlier position within the window is tried. Same
+ * rules and same output as tcomp_lz77_parse() with an unlimited chain, but
+ * O(n x window) time (0.2 MB/s on text, 0.04 MB/s on random data). Kept as
+ * the reference that the hash-chain matcher is tested and benchmarked
+ * against; not used for compression.
+ *
+ * Parameters and return values as tcomp_lz77_parse(), without max_chain.
+ */
+tcomp_status tcomp_lz77_parse_naive(const uint8_t *data, size_t len, size_t window,
+                                    tcomp_lz77_tokens *tokens);
 
 /**
  * @brief Rebuild bytes from tokens into a caller-provided buffer.

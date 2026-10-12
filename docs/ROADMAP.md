@@ -10,13 +10,15 @@ tcomp is built in milestones. Each one ends with working code, passing tests, up
 | M1 | Bit I/O: `bitwriter` / `bitreader` | Random bit sequences of random widths round-trip | `v0.1-bitio` |
 | M2 | Huffman: static, then canonical codes | Edge cases + Canterbury corpus round-trip | `v0.2-huffman` |
 | M3 | LZ77: naive matcher, literal/match tokens | Round-trips; ratio measured | `v0.3-lz77` |
-| M4 | LZ77 + Huffman, DEFLATE-style two alphabets | Beats plain Huffman on text | `v0.4-deflate` |
-| M5 | `.tcmp` v1: full format, CRC32, `info` command | Corrupted files are rejected | `v1.0` |
-| M6 | Hash-chain matcher + `tcomp bench` | Speedup over naive measured | `v1.1-hashchain` |
-| M7 | Blocks + streaming, bounded memory | Large pipes compress with flat RAM | `v1.2-streaming` |
-| M8 | Fuzzing (libFuzzer) and robustness | Hours of fuzzing, no crash | `v1.3-fuzz` |
-| M9 | Multithreading over blocks | Speedup and ratio loss at 1/2/4/8 threads | `v1.4-threads` |
+| M4 | Hash-chain matcher + benchmark harness (`make bench`) | Speedup over naive measured; AUTO uses LZ77 | `v0.4-hashchain` |
+| M5 | LZ77 + Huffman, DEFLATE-style two alphabets | Beats both LZ77 and Huffman alone | `v0.5-deflate` |
+| M6 | `.tcmp` v1: full format, CRC32, `info` command | Corrupted files are rejected | `v1.0` |
+| M7 | Blocks + streaming, bounded memory | Large pipes compress with flat RAM | `v1.1-streaming` |
+| M8 | Fuzzing (libFuzzer) and robustness | Hours of fuzzing, no crash | `v1.2-fuzz` |
+| M9 | Multithreading over blocks | Speedup and ratio loss at 1/2/4/8 threads | `v1.3-threads` |
 | M10+ | Optional: BWT mode, lazy matching or ANS | Benchmarked against LZ77 mode | — |
+
+**Order change (M4):** the hash-chain matcher was planned for M6. It moved to M4, straight after the naive matcher, so that the slow matcher (0.07–0.2 MB/s) would not be carried through LZ77 + Huffman and the v1.0 release, and so the speedup was measured while the naive baseline was fresh. LZ77 + Huffman and the v1 format each moved one milestone later.
 
 ## Progress
 
@@ -24,9 +26,9 @@ tcomp is built in milestones. Each one ends with working code, passing tests, up
 - [x] M1 Bit I/O
 - [x] M2 Huffman
 - [x] M3 LZ77
-- [ ] M4 LZ77 + Huffman
-- [ ] M5 `.tcmp` v1 (resume-ready)
-- [ ] M6 Hash chains + benchmarks
+- [x] M4 Hash chains + benchmarks
+- [ ] M5 LZ77 + Huffman
+- [ ] M6 `.tcmp` v1 (resume-ready)
 - [ ] M7 Blocks + streaming
 - [ ] M8 Fuzzing
 - [ ] M9 Multithreading

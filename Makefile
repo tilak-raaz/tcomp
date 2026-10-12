@@ -5,7 +5,9 @@
 #   make test            unit tests + roundtrip tests (debug unless BUILD is set)
 #   make CC=clang test   same, with clang
 #   make corpus          download the Canterbury corpus, round-trip it, print ratios
-#   make format         reformat all C files with clang-format
+#   make bench           release-build benchmark: matchers and methods on the corpus
+#   make bench-quick     same, skipping the slow naive matcher
+#   make format          reformat all C files with clang-format
 #   make format-check    fail if any file is not formatted (used by CI)
 #   make clean
 
@@ -40,9 +42,13 @@ TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(TEST_SRCS:tests/unit/%.c=$(OBJDIR)/tests/%.o)
 TEST_BIN  := $(BUILDDIR)/unit_tests
 
-FORMAT_FILES := $(wildcard src/*.c include/tcomp/*.h tests/unit/*.c tests/unit/*.h)
+BENCH_BIN   := $(BUILDDIR)/tcomp-bench
+BENCH_OBJ   := $(OBJDIR)/bench/bench.o
+BENCH_FILES  = bench/corpus/canterbury/* bench/corpus/large/*
 
-.PHONY: all test unit roundtrip corpus clean format format-check
+FORMAT_FILES := $(wildcard src/*.c include/tcomp/*.h tests/unit/*.c tests/unit/*.h bench/*.c)
+
+.PHONY: all test unit roundtrip corpus bench bench-quick clean format format-check
 
 all: $(CLI)
 
@@ -57,6 +63,13 @@ $(TEST_BIN): $(TEST_OBJS) $(LIB)
 	$(CC) $(LDFLAGS) -o $@ $^ -lm
 
 $(OBJDIR)/src/%.o: src/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(BENCH_BIN): $(BENCH_OBJ) $(LIB)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(OBJDIR)/bench/%.o: bench/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
@@ -76,6 +89,12 @@ corpus: $(CLI)
 	./bench/fetch-corpus.sh
 	./tests/corpus.sh $(CLI) $(BUILDDIR)/corpus
 
+# Benchmarks always use the optimised build, whatever BUILD says.
+bench bench-quick:
+	./bench/fetch-corpus.sh
+	$(MAKE) BUILD=release build/release/tcomp-bench
+	./build/release/tcomp-bench $(if $(filter bench-quick,$@),--quick) $(BENCH_FILES)
+
 clean:
 	rm -rf build
 
@@ -85,4 +104,4 @@ format:
 format-check:
 	clang-format --dry-run --Werror $(FORMAT_FILES)
 
--include $(LIB_OBJS:.o=.d) $(CLI_OBJ:.o=.d) $(TEST_OBJS:.o=.d)
+-include $(LIB_OBJS:.o=.d) $(CLI_OBJ:.o=.d) $(TEST_OBJS:.o=.d) $(BENCH_OBJ:.o=.d)

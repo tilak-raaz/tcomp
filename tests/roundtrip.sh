@@ -37,7 +37,7 @@ printf '\0' > "$DATA/one_zero_byte.bin"
 head -c 1048576 /dev/zero > "$DATA/zeros_1MiB.bin"
 head -c 65537 /dev/zero | tr '\0' 'A' > "$DATA/repeated_A_64KiB_plus_1.txt"
 head -c 1048576 /dev/urandom > "$DATA/random_1MiB.bin"
-head -c 16384 /dev/urandom > "$DATA/random_16KiB.bin"   # LZ77 worst case, small enough to be quick
+head -c 16384 /dev/urandom > "$DATA/random_16KiB.bin"
 printf 'héllo wörld — ñandú 日本語 😀\n%.0s' $(seq 1 500) > "$DATA/utf8.txt"
 cat src/*.c include/tcomp/*.h > "$DATA/source_code.txt"
 cp "$TCOMP" "$DATA/executable.bin"
@@ -54,11 +54,6 @@ for f in "$DATA"/*; do
     name=$(basename "$f")
 
     for m in auto store huffman lz77; do
-        # The naive LZ77 matcher needs minutes for 1 MiB of random data under
-        # the sanitizers; random_16KiB covers that case. Remove in M6.
-        if [ "$m" = lz77 ] && [ "$name" = random_1MiB.bin ]; then
-            continue
-        fi
         "$TCOMP" compress -m "$m" "$f" "$OUT/$name.$m.tcmp" \
             && "$TCOMP" decompress "$OUT/$name.$m.tcmp" "$OUT/$name.restored" \
             && cmp -s "$f" "$OUT/$name.restored" \
@@ -76,8 +71,8 @@ done
 # ---- method choice --------------------------------------------------------
 [ "$(method_of "$OUT/random_1MiB.bin.auto.tcmp")" = 0 ] \
     && ok "auto stores random data" || bad "auto stores random data"
-[ "$(method_of "$OUT/source_code.txt.auto.tcmp")" = 1 ] \
-    && ok "auto uses huffman on text" || bad "auto uses huffman on text"
+[ "$(method_of "$OUT/source_code.txt.auto.tcmp")" = 2 ] \
+    && ok "auto uses lz77 on source code" || bad "auto uses lz77 on source code"
 [ "$(size_of "$OUT/source_code.txt.huffman.tcmp")" -lt $(( $(size_of "$DATA/source_code.txt") * 7 / 10 )) ] \
     && ok "huffman shrinks text below 70%" || bad "huffman shrinks text below 70%"
 [ "$(size_of "$OUT/zeros_1MiB.bin.lz77.tcmp")" -lt 20000 ] \

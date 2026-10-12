@@ -2,7 +2,7 @@
 
 This document explains how tcomp is put together and the conventions every module follows. It grows with each milestone.
 
-## Architecture (M3)
+## Architecture (M4)
 
 ```
              src/main.c  (CLI: argument parsing, -m METHOD, exit codes, messages)
@@ -15,22 +15,24 @@ This document explains how tcomp is put together and the conventions every modul
         │       │        STORE, HUFFMAN, LZ77 payloads │
         │       ├──► huffman.c   lengths, canonical    │
         │       │                codes, decode table   │
-        │       ├──► lz77.c      tokens, naive matcher,│
-        │       │                expansion             │
+        │       ├──► lz77.c      tokens, hash-chain    │
+        │       │                matcher, expansion    │
         │       └──► bitio.c     bit writer/reader     │
         │  status.c      error messages                │
         └────────────────────────────────────────────┘
 ```
 
-The CLI and the unit tests both link against the same static library, so tests exercise exactly the code the CLI ships.
+The CLI, the unit tests and the benchmark (`bench/bench.c`) all link against the same static library, so tests and benchmarks exercise exactly the code the CLI ships.
+
+**Data flow, AUTO (the default):** read all input → plan HUFFMAN (count frequencies, build codes, compute exact size) → parse LZ77 tokens and compute their exact size → write whichever of STORE, HUFFMAN and LZ77 is smallest. Nothing is encoded twice.
 
 **Data flow, HUFFMAN compression:** read all input → count byte frequencies → `tcomp_huff_build_lengths` → `tcomp_huff_assign_codes` → compute the exact output size; if it is not smaller than the input, write STORE instead → otherwise write header, size, 4-bit lengths and one code per byte through the bit writer.
 
-**Data flow, LZ77 compression:** read all input → `tcomp_lz77_parse` into a token array → write each token as a 9-bit literal or 24-bit match → header, size, bitstream.
+**Data flow, LZ77 compression:** read all input → `tcomp_lz77_parse` (hash chains, 128 candidates per position) into a token array → write each token as a 9-bit literal or 24-bit match → header, size, bitstream.
 
 **Decompression:** read header → validate → dispatch on method. HUFFMAN: read size and lengths → validate → build the decode table → decode *n* symbols into a 64 KB output buffer → check padding. LZ77: read size → bound it by the bits available → decode tokens into a 96 KB sliding buffer that always keeps the last 32 KB → check padding.
 
-Planned modules, each added in its milestone: `crc32.c` (M5), `matcher.c` (M6), `block.c` (M7), `threads.c` (M9).
+Planned modules, each added in its milestone: `deflate.c` (M5), `crc32.c` (M6), `block.c` (M7), `threads.c` (M9).
 
 ## Modules
 
@@ -49,7 +51,7 @@ How the reader works: to peek N bits at bit position `pos`, it loads the 5 bytes
 
 ### huffman (`include/tcomp/huffman.h`, M2)
 
-Length-limited canonical Huffman coding for any alphabet up to 1024 symbols (M4 reuses it for LZ77's two alphabets). See [decision 0004](decisions/0004-huffman-design.md).
+Length-limited canonical Huffman coding for any alphabet up to 1024 symbols (M5 reuses it for LZ77's two alphabets). See [decision 0004](decisions/0004-huffman-design.md).
 
 | Function | Input → output | How |
 | --- | --- | --- |
@@ -66,11 +68,14 @@ Turns bytes into literal/match tokens and back, with DEFLATE's parameters (match
 
 | Function | Does |
 | --- | --- |
-| `tcomp_lz77_parse` | Greedy parse with a naive matcher: at each position try every distance from 1 to the window, keep the longest match (nearest on ties), emit it if ≥ 3 bytes, else emit a literal. O(n × window). |
+| `tcomp_lz77_parse` | Greedy parse with hash chains: at each position, try only earlier positions whose next 3 bytes hash the same, nearest first, up to `max_chain` of them; keep the longest match (nearest on ties), emit it if ≥ 3 bytes, else a literal. See [decision 0006](decisions/0006-hash-chain-matcher.md). |
+| `tcomp_lz77_parse_naive` | Same rules, but tries every distance from 1 to the window: O(n × window). The reference for tests and benchmarks. |
 | `tcomp_lz77_expand` | Tokens → bytes in a caller buffer, validating each token. Matches copy byte by byte so overlapping copies (distance < length) work. |
 | `tcomp_lz77_tokens_*` | A growable token array (4 bytes per token). |
 
-The matcher compares against the *input*, even where a match overlaps the bytes it is about to produce. That is correct because the decoder will have produced exactly those bytes, one at a time, by the time it reads them.
+How the hash chains work: `head[h]` holds the most recent position whose next 3 bytes hash to `h`; `prev[p % 32768]` holds the position before `p` with the same hash. After each token, every position it covered is pushed onto its chain. To search at position `i`, start at `head[hash(i)]` and follow `prev` links, stopping at the window edge or after `max_chain` steps. Because any match of 3 or more bytes shares the first 3 bytes, it shares the hash, so no useful candidate is missed; with no limit the tokens equal the naive parser's exactly.
+
+The matchers compare against the *input*, even where a match overlaps the bytes it is about to produce. That is correct because the decoder will have produced exactly those bytes, one at a time, by the time it reads them.
 
 The streaming decoder in `container.c` does not use `tcomp_lz77_expand`: it never holds more than 96 KB of output. When a token would not fit, it writes out everything not yet written and slides the newest 32 KB (all a match can reach) to the front of the buffer.
 
@@ -93,7 +98,9 @@ The streaming decoder in `container.c` does not use `tcomp_lz77_expand`: it neve
 | Unit tests | `tests/unit/test_<module>.c` | Each module's functions in isolation, including error paths; exact expected bytes; seeded random roundtrips |
 | Roundtrip tests | `tests/roundtrip.sh` | `decompress(compress(x)) == x` through the real CLI, via files and pipes, on edge-case data |
 | Negative tests | `tests/roundtrip.sh`, `test_container.c` | Bad input exits with code 1, leaves no output file, triggers no sanitizer; hand-built hostile files hit every decoder check |
+| Differential | `test_lz77.c` | Hash chains with no limit give exactly the naive parser's tokens, on random inputs and after the chain ring wraps |
 | Corpus | `make corpus` (`tests/corpus.sh`) | Every Canterbury corpus file round-trips with every method; prints ratios |
+| Benchmark | `make bench` (`bench/bench.c`) | In-process timing, best of 5: matcher sweep against naive, and every method end to end with output verified |
 | Fuzzing | `fuzz/` (M8) | The decoder survives arbitrary bytes |
 
 Debug builds run all tests under AddressSanitizer and UndefinedBehaviorSanitizer. Sanitizer failures exit with code 86 so they are never confused with a normal error.

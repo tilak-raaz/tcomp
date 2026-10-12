@@ -183,7 +183,7 @@ TEST(test_codes_validate_lengths) {
 /* ---- decoder ------------------------------------------------------------ */
 
 TEST(test_decoder_random_roundtrip) {
-    /* A 300-symbol alphabet, as M4's literal/length alphabet will need. */
+    /* A 300-symbol alphabet, as M5's literal/length alphabet will need. */
     enum { N = 300, COUNT = 20000 };
     uint64_t freqs[N];
     uint8_t lengths[N];

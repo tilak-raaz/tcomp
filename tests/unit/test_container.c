@@ -244,33 +244,54 @@ TEST(test_roundtrip_skewed_text) {
 
 /* ---- method selection --------------------------------------------------- */
 
-TEST(test_auto_uses_huffman_when_smaller) {
-    uint8_t text[4000];
-    for (size_t i = 0; i < sizeof text; i++) {
-        text[i] = "aaaaaaabbbccd"[i % 13];
+/* Compress with AUTO; check it chose `expected` and that its output is
+ * exactly as small as the best of the three forced methods. */
+static int auto_picks(const uint8_t *data, size_t len, tcomp_method expected) {
+    const tcomp_method forced[] = {TCOMP_METHOD_STORE, TCOMP_METHOD_HUFFMAN, TCOMP_METHOD_LZ77};
+    size_t smallest = SIZE_MAX, auto_len = 0;
+    for (int m = 0; m < 3; m++) {
+        size_t n = 0;
+        uint8_t *out = compress_bytes(data, len, forced[m], &n);
+        if (out == NULL) {
+            return 0;
+        }
+        smallest = n < smallest ? n : smallest;
+        free(out);
     }
-    size_t out_len = 0;
-    uint8_t *out = compress_bytes(text, sizeof text, TCOMP_METHOD_AUTO, &out_len);
-    CHECK(out != NULL && out[5] == TCOMP_METHOD_HUFFMAN);
-    CHECK(out_len < sizeof text / 2);
+    uint8_t *out = compress_bytes(data, len, TCOMP_METHOD_AUTO, &auto_len);
+    int ok = out != NULL && out[5] == expected && auto_len == smallest;
     free(out);
+    return ok;
 }
 
-TEST(test_auto_falls_back_to_store) {
-    /* Small or incompressible input: 136 bytes of Huffman overhead can't pay off. */
-    const uint8_t tiny[] = "hello";
-    size_t out_len = 0;
-    uint8_t *out = compress_bytes(tiny, 5, TCOMP_METHOD_AUTO, &out_len);
-    CHECK(out != NULL && out[5] == TCOMP_METHOD_STORE && out_len == 6 + 5);
-    free(out);
+TEST(test_auto_picks_smallest_method) {
+    uint8_t buf[4000];
+    uint32_t x = 2024;
 
-    uint8_t every_byte[1024];
-    for (size_t i = 0; i < sizeof every_byte; i++) {
-        every_byte[i] = (uint8_t)i; /* uniform: Huffman gains nothing */
+    /* Repeated phrases: LZ77 wins. */
+    for (size_t i = 0; i < sizeof buf; i++) {
+        buf[i] = "the cat sat on the mat. "[i % 24];
     }
-    out = compress_bytes(every_byte, sizeof every_byte, TCOMP_METHOD_AUTO, &out_len);
-    CHECK(out != NULL && out[5] == TCOMP_METHOD_STORE && out_len == 6 + sizeof every_byte);
-    free(out);
+    CHECK(auto_picks(buf, sizeof buf, TCOMP_METHOD_LZ77));
+
+    /* Random bytes from a 16-letter alphabet: no repeats worth a match, but
+     * 4 bits per byte suffice, so Huffman wins. */
+    for (size_t i = 0; i < sizeof buf; i++) {
+        x = x * 1103515245u + 12345u;
+        buf[i] = (uint8_t)('a' + (x >> 16) % 16);
+    }
+    CHECK(auto_picks(buf, sizeof buf, TCOMP_METHOD_HUFFMAN));
+
+    /* Uniform random bytes: nothing helps, so STORE. */
+    for (size_t i = 0; i < sizeof buf; i++) {
+        x = x * 1103515245u + 12345u;
+        buf[i] = (uint8_t)(x >> 24);
+    }
+    CHECK(auto_picks(buf, sizeof buf, TCOMP_METHOD_STORE));
+
+    /* Tiny input: every method's overhead outweighs its gain. */
+    CHECK(auto_picks((const uint8_t *)"hello", 5, TCOMP_METHOD_STORE));
+    CHECK(auto_picks(NULL, 0, TCOMP_METHOD_STORE));
 }
 
 TEST(test_huffman_exact_size) {
@@ -533,8 +554,7 @@ void suite_container(void) {
     RUN(test_roundtrip_larger_than_copy_chunk);
     RUN(test_roundtrip_skewed_text);
 
-    RUN(test_auto_uses_huffman_when_smaller);
-    RUN(test_auto_falls_back_to_store);
+    RUN(test_auto_picks_smallest_method);
     RUN(test_huffman_exact_size);
     RUN(test_compress_rejects_unknown_method);
 

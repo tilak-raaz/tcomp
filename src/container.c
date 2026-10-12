@@ -148,50 +148,43 @@ static tcomp_status check_padding(const tcomp_bitreader *br) {
 
 /* ---- compression -------------------------------------------------------- */
 
-static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_method method,
-                                    FILE *out) {
+/* Everything needed to write a HUFFMAN payload, plus its exact size. */
+typedef struct {
+    uint8_t lengths[BYTE_SYMBOLS];
+    uint16_t codes[BYTE_SYMBOLS];
+    uint64_t bits; /* bitstream size: length table + all codes */
+} huffman_plan;
+
+static tcomp_status plan_huffman(const uint8_t *data, size_t len, huffman_plan *plan) {
     uint64_t freqs[BYTE_SYMBOLS] = {0};
     for (size_t i = 0; i < len; i++) {
         freqs[data[i]]++;
     }
-    uint8_t lengths[BYTE_SYMBOLS];
-    uint16_t codes[BYTE_SYMBOLS];
-    tcomp_status st = tcomp_huff_build_lengths(freqs, BYTE_SYMBOLS, TCOMP_HUFF_MAX_BITS, lengths);
+    tcomp_status st =
+        tcomp_huff_build_lengths(freqs, BYTE_SYMBOLS, TCOMP_HUFF_MAX_BITS, plan->lengths);
     if (st == TCOMP_OK) {
-        st = tcomp_huff_assign_codes(lengths, BYTE_SYMBOLS, codes);
+        st = tcomp_huff_assign_codes(plan->lengths, BYTE_SYMBOLS, plan->codes);
     }
-    if (st != TCOMP_OK) {
-        return st;
-    }
-
-    /* The exact HUFFMAN payload size is known before encoding anything, so
-     * AUTO can choose without doing the work twice. */
-    uint64_t bits = (uint64_t)BYTE_SYMBOLS * LENGTH_BITS;
+    plan->bits = (uint64_t)BYTE_SYMBOLS * LENGTH_BITS;
     for (size_t s = 0; s < BYTE_SYMBOLS; s++) {
-        bits += freqs[s] * lengths[s];
+        plan->bits += freqs[s] * plan->lengths[s];
     }
-    uint64_t huffman_payload = SIZE_FIELD + (bits + 7) / 8;
-    if (method == TCOMP_METHOD_AUTO) {
-        method = huffman_payload < len ? TCOMP_METHOD_HUFFMAN : TCOMP_METHOD_STORE;
-    }
+    return st;
+}
 
-    if (method == TCOMP_METHOD_STORE) {
-        st = write_header(out, TCOMP_METHOD_STORE);
-        return st != TCOMP_OK ? st : write_all(out, data, len);
-    }
-
+static tcomp_status write_huffman(const uint8_t *data, size_t len, const huffman_plan *plan,
+                                  FILE *out) {
     tcomp_bitwriter bw;
-    st = tcomp_bw_init(&bw, (size_t)((bits + 7) / 8));
+    tcomp_status st = tcomp_bw_init(&bw, (size_t)((plan->bits + 7) / 8));
     for (size_t s = 0; s < BYTE_SYMBOLS && st == TCOMP_OK; s++) {
-        st = tcomp_bw_write_bits(&bw, lengths[s], LENGTH_BITS);
+        st = tcomp_bw_write_bits(&bw, plan->lengths[s], LENGTH_BITS);
     }
     for (size_t i = 0; i < len && st == TCOMP_OK; i++) {
-        st = tcomp_bw_write_bits(&bw, codes[data[i]], lengths[data[i]]);
+        st = tcomp_bw_write_bits(&bw, plan->codes[data[i]], plan->lengths[data[i]]);
     }
     if (st == TCOMP_OK) {
         st = tcomp_bw_flush(&bw);
     }
-
     if (st == TCOMP_OK) {
         st = write_sized_payload(out, TCOMP_METHOD_HUFFMAN, len, &bw);
     }
@@ -199,24 +192,22 @@ static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_metho
     return st;
 }
 
-/* LZ77 tokens as fixed-width fields:
- *   literal  0 + byte                      (9 bits)
- *   match    1 + (length - 3) + (distance - 1)  (1 + 8 + 15 = 24 bits) */
-static tcomp_status compress_lz77(const uint8_t *data, size_t len, FILE *out) {
-    tcomp_lz77_tokens tokens;
-    tcomp_lz77_tokens_init(&tokens);
-    tcomp_status st = tcomp_lz77_parse(data, len, TCOMP_LZ77_WINDOW, &tokens);
+static uint64_t lz77_bits(const tcomp_lz77_tokens *tokens) {
+    uint64_t bits = 0;
+    for (size_t t = 0; t < tokens->count; t++) {
+        bits += tokens->items[t].distance == 0 ? LZ_LITERAL_BITS : LZ_MATCH_BITS;
+    }
+    return bits;
+}
 
+/* LZ77 tokens as fixed-width fields:
+ *   literal  0 + byte                                (9 bits)
+ *   match    1 + (length - 3) + (distance - 1)       (1 + 8 + 15 = 24 bits) */
+static tcomp_status write_lz77(const tcomp_lz77_tokens *tokens, size_t len, FILE *out) {
     tcomp_bitwriter bw;
-    if (st == TCOMP_OK) {
-        st = tcomp_bw_init(&bw, len / 2 + 16);
-    }
-    if (st != TCOMP_OK) {
-        tcomp_lz77_tokens_free(&tokens);
-        return st;
-    }
-    for (size_t t = 0; t < tokens.count && st == TCOMP_OK; t++) {
-        const tcomp_lz77_token *tok = &tokens.items[t];
+    tcomp_status st = tcomp_bw_init(&bw, (size_t)((lz77_bits(tokens) + 7) / 8) + 1);
+    for (size_t t = 0; t < tokens->count && st == TCOMP_OK; t++) {
+        const tcomp_lz77_token *tok = &tokens->items[t];
         if (tok->distance == 0) {
             st = tcomp_bw_write_bits(&bw, tok->length, LZ_LITERAL_BITS);
         } else {
@@ -226,7 +217,6 @@ static tcomp_status compress_lz77(const uint8_t *data, size_t len, FILE *out) {
             st = tcomp_bw_write_bits(&bw, field, LZ_MATCH_BITS);
         }
     }
-    tcomp_lz77_tokens_free(&tokens);
     if (st == TCOMP_OK) {
         st = tcomp_bw_flush(&bw);
     }
@@ -234,6 +224,56 @@ static tcomp_status compress_lz77(const uint8_t *data, size_t len, FILE *out) {
         st = write_sized_payload(out, TCOMP_METHOD_LZ77, len, &bw);
     }
     tcomp_bw_free(&bw);
+    return st;
+}
+
+/* Run the requested method, or for AUTO every method, and write the result.
+ * Payload sizes are computed exactly before anything is written, so AUTO
+ * never encodes twice: it plans HUFFMAN and parses LZ77, then writes the
+ * smallest, preferring the simpler method on ties. */
+static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_method method,
+                                    FILE *out) {
+    huffman_plan plan;
+    tcomp_lz77_tokens tokens;
+    tcomp_lz77_tokens_init(&tokens);
+    tcomp_status st = TCOMP_OK;
+    uint64_t best = len; /* STORE's payload */
+    tcomp_method chosen = TCOMP_METHOD_STORE;
+
+    if (method == TCOMP_METHOD_HUFFMAN || method == TCOMP_METHOD_AUTO) {
+        st = plan_huffman(data, len, &plan);
+        uint64_t size = SIZE_FIELD + (plan.bits + 7) / 8;
+        if (st == TCOMP_OK && (method == TCOMP_METHOD_HUFFMAN || size < best)) {
+            best = size;
+            chosen = TCOMP_METHOD_HUFFMAN;
+        }
+    }
+    if (st == TCOMP_OK && (method == TCOMP_METHOD_LZ77 || method == TCOMP_METHOD_AUTO)) {
+        st = tcomp_lz77_parse(data, len, TCOMP_LZ77_WINDOW, TCOMP_LZ77_DEFAULT_CHAIN, &tokens);
+        uint64_t size = SIZE_FIELD + (lz77_bits(&tokens) + 7) / 8;
+        if (st == TCOMP_OK && (method == TCOMP_METHOD_LZ77 || size < best)) {
+            best = size;
+            chosen = TCOMP_METHOD_LZ77;
+        }
+    }
+
+    if (st == TCOMP_OK) {
+        switch (chosen) {
+        case TCOMP_METHOD_HUFFMAN:
+            st = write_huffman(data, len, &plan, out);
+            break;
+        case TCOMP_METHOD_LZ77:
+            st = write_lz77(&tokens, len, out);
+            break;
+        default:
+            st = write_header(out, TCOMP_METHOD_STORE);
+            if (st == TCOMP_OK) {
+                st = write_all(out, data, len);
+            }
+            break;
+        }
+    }
+    tcomp_lz77_tokens_free(&tokens);
     return st;
 }
 
@@ -254,8 +294,7 @@ tcomp_status tcomp_compress_stream(FILE *in, FILE *out, tcomp_method method) {
     size_t len = 0;
     tcomp_status st = read_all(in, &data, &len);
     if (st == TCOMP_OK) {
-        st = method == TCOMP_METHOD_LZ77 ? compress_lz77(data, len, out)
-                                         : compress_memory(data, len, method, out);
+        st = compress_memory(data, len, method, out);
     }
     free(data);
     return st;
