@@ -2,6 +2,22 @@
 
 All notable changes, one section per milestone tag. Newest first.
 
+## v0.5-deflate (M5): 2026-10-12
+
+### Added
+- LZH codec (`include/tcomp/lzh.h`, `src/lzh.c`): LZ77 tokens Huffman-coded with DEFLATE's layout. 286-symbol literal/length and 30-symbol distance codes with RFC 1951's extra-bit tables; code lengths run-length coded (16/17/18) and Huffman-coded with a 19-symbol code-length code.
+- LZH method (id 3), `tcomp compress -m lzh`, fully specified in [docs/FORMAT.md](docs/FORMAT.md). AUTO now chooses among STORE, HUFFMAN, LZ77 and LZH.
+- Exact size planning: `tcomp_lzh_plan` computes the bitstream size to the bit before writing (tested against the bits actually written).
+- 15 LZH unit tests: RFC 1951 known answers, every length and distance checked one-to-one, exact run-length sequences, token roundtrips, and hand-built hostile headers (bad counts, repeat with nothing to repeat, runs past the end, oversubscribed codes, reserved symbol 256, match with no distance code).
+- `make corpus` prints every method's ratio next to gzip -9.
+- Decision note 0007; LZH results, gap analysis against gzip in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+### Changed
+- **Canterbury corpus: 3.58×** (LZ77 alone 2.64×, Huffman 2.14×; gzip -9 3.85×, gzip -6 3.83×, gzip -1 3.25×).
+- LZ77 and LZH share one streaming token-expansion loop in the container; only the token reader differs.
+- Roundtrip script covers LZH (112 checks); benchmark reports LZH end to end.
+- Version string bumped to 0.5.0.
+
 ## v0.4-hashchain (M4): 2026-10-08
 
 ### Added

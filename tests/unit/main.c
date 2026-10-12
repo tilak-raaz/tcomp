@@ -16,6 +16,8 @@ int main(void) {
     suite_huffman();
     printf("== lz77\n");
     suite_lz77();
+    printf("== lzh\n");
+    suite_lzh();
 
     printf("\n%d/%d tests passed\n", test_total - test_failed, test_total);
     return test_failed == 0 ? 0 : 1;

@@ -2,7 +2,7 @@
 
 This document explains how tcomp is put together and the conventions every module follows. It grows with each milestone.
 
-## Architecture (M4)
+## Architecture (M5)
 
 ```
              src/main.c  (CLI: argument parsing, -m METHOD, exit codes, messages)
@@ -12,7 +12,9 @@ This document explains how tcomp is put together and the conventions every modul
         │ libtcomp.a                                  │
         │                                             │
         │  container.c   header, method choice (AUTO), │
-        │       │        STORE, HUFFMAN, LZ77 payloads │
+        │       │        payloads, token expansion     │
+        │       ├──► lzh.c       DEFLATE-style codes   │
+        │       │                for LZ77 tokens       │
         │       ├──► huffman.c   lengths, canonical    │
         │       │                codes, decode table   │
         │       ├──► lz77.c      tokens, hash-chain    │
@@ -24,15 +26,17 @@ This document explains how tcomp is put together and the conventions every modul
 
 The CLI, the unit tests and the benchmark (`bench/bench.c`) all link against the same static library, so tests and benchmarks exercise exactly the code the CLI ships.
 
-**Data flow, AUTO (the default):** read all input → plan HUFFMAN (count frequencies, build codes, compute exact size) → parse LZ77 tokens and compute their exact size → write whichever of STORE, HUFFMAN and LZ77 is smallest. Nothing is encoded twice.
+**Data flow, AUTO (the default):** read all input → plan HUFFMAN (count frequencies, build codes, compute exact size) → parse LZ77 tokens once → compute the LZ77 size → plan LZH on the same tokens → write whichever of STORE, HUFFMAN, LZ77 and LZH is smallest. Nothing is encoded twice.
+
+**Data flow, LZH compression:** read all input → `tcomp_lz77_parse` → `tcomp_lzh_plan` (count literal/length and distance symbols, build both codes, run-length code their lengths, build the code-length code, total the exact size) → `tcomp_lzh_write` → header, size, bitstream.
 
 **Data flow, HUFFMAN compression:** read all input → count byte frequencies → `tcomp_huff_build_lengths` → `tcomp_huff_assign_codes` → compute the exact output size; if it is not smaller than the input, write STORE instead → otherwise write header, size, 4-bit lengths and one code per byte through the bit writer.
 
 **Data flow, LZ77 compression:** read all input → `tcomp_lz77_parse` (hash chains, 128 candidates per position) into a token array → write each token as a 9-bit literal or 24-bit match → header, size, bitstream.
 
-**Decompression:** read header → validate → dispatch on method. HUFFMAN: read size and lengths → validate → build the decode table → decode *n* symbols into a 64 KB output buffer → check padding. LZ77: read size → bound it by the bits available → decode tokens into a 96 KB sliding buffer that always keeps the last 32 KB → check padding.
+**Decompression:** read header → validate → dispatch on method. HUFFMAN: read size and lengths → validate → build the decode table → decode *n* symbols into a 64 KB output buffer → check padding. LZ77 and LZH: read size → (LZH: read and validate the code tables) → bound the size by the bits available → read tokens with the method's token reader and expand them into a 96 KB sliding buffer that always keeps the last 32 KB → check padding. The expansion loop (`expand_tokens`) is shared; the methods differ only in how a token is read.
 
-Planned modules, each added in its milestone: `deflate.c` (M5), `crc32.c` (M6), `block.c` (M7), `threads.c` (M9).
+Planned modules, each added in its milestone: `crc32.c` (M6), `block.c` (M7), `threads.c` (M9).
 
 ## Modules
 
@@ -78,6 +82,20 @@ How the hash chains work: `head[h]` holds the most recent position whose next 3 
 The matchers compare against the *input*, even where a match overlaps the bytes it is about to produce. That is correct because the decoder will have produced exactly those bytes, one at a time, by the time it reads them.
 
 The streaming decoder in `container.c` does not use `tcomp_lz77_expand`: it never holds more than 96 KB of output. When a token would not fit, it writes out everything not yet written and slides the newest 32 KB (all a match can reach) to the front of the buffer.
+
+### lzh (`include/tcomp/lzh.h`, M5)
+
+Huffman-codes LZ77 tokens with DEFLATE's layout: a 286-symbol literal/length code and a 30-symbol distance code, extra bits for exact lengths and distances, and both tables' code lengths run-length coded and Huffman-coded with a 19-symbol code-length code. See [decision 0007](decisions/0007-lzh-design.md) and the byte-level spec in [FORMAT.md](FORMAT.md).
+
+| Function | Does |
+| --- | --- |
+| `tcomp_lzh_length_code`, `tcomp_lzh_distance_code` | Value → (symbol, extra bits, extra value), by binary search in RFC 1951's base tables. |
+| `tcomp_lzh_plan` | Tokens → both Huffman codes, the run-length-coded tables, the code-length code, and the exact bitstream size. Writes nothing. |
+| `tcomp_lzh_write` | Header (counts, code-length code, tables) then every token's codes and extra bits. |
+| `tcomp_lzh_read_header` | Reads and validates the tables; builds the two decoders. |
+| `tcomp_lzh_read_token` | One literal/length symbol (+ extra bits, + distance symbol and extra bits for a match). |
+
+Why the code-length code is sent in a strange order (16, 17, 18, 0, 8, 7, …): the symbols most likely to be used come first, so the encoder can stop after the last non-zero one and drop the rest (HCLEN).
 
 ## Conventions
 

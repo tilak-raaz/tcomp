@@ -94,6 +94,7 @@ static int roundtrips(const uint8_t *data, size_t len) {
     return roundtrips_with(data, len, TCOMP_METHOD_STORE) &&
            roundtrips_with(data, len, TCOMP_METHOD_HUFFMAN) &&
            roundtrips_with(data, len, TCOMP_METHOD_LZ77) &&
+           roundtrips_with(data, len, TCOMP_METHOD_LZH) &&
            roundtrips_with(data, len, TCOMP_METHOD_AUTO);
 }
 
@@ -247,9 +248,10 @@ TEST(test_roundtrip_skewed_text) {
 /* Compress with AUTO; check it chose `expected` and that its output is
  * exactly as small as the best of the three forced methods. */
 static int auto_picks(const uint8_t *data, size_t len, tcomp_method expected) {
-    const tcomp_method forced[] = {TCOMP_METHOD_STORE, TCOMP_METHOD_HUFFMAN, TCOMP_METHOD_LZ77};
+    const tcomp_method forced[] = {TCOMP_METHOD_STORE, TCOMP_METHOD_HUFFMAN, TCOMP_METHOD_LZ77,
+                                   TCOMP_METHOD_LZH};
     size_t smallest = SIZE_MAX, auto_len = 0;
-    for (int m = 0; m < 3; m++) {
+    for (int m = 0; m < 4; m++) {
         size_t n = 0;
         uint8_t *out = compress_bytes(data, len, forced[m], &n);
         if (out == NULL) {
@@ -268,11 +270,11 @@ TEST(test_auto_picks_smallest_method) {
     uint8_t buf[4000];
     uint32_t x = 2024;
 
-    /* Repeated phrases: LZ77 wins. */
+    /* Repeated phrases: LZ77 removes the repeats, Huffman shrinks the rest. */
     for (size_t i = 0; i < sizeof buf; i++) {
         buf[i] = "the cat sat on the mat. "[i % 24];
     }
-    CHECK(auto_picks(buf, sizeof buf, TCOMP_METHOD_LZ77));
+    CHECK(auto_picks(buf, sizeof buf, TCOMP_METHOD_LZH));
 
     /* Random bytes from a 16-letter alphabet: no repeats worth a match, but
      * 4 bits per byte suffice, so Huffman wins. */

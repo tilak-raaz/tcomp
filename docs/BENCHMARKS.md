@@ -2,6 +2,65 @@
 
 Ratios are tracked from M2, speed from M3. Since M4, `make bench` reproduces the speed tables (release build, in-process, best of 5; about 4.5 minutes because of the naive matcher, or `make bench-quick` without it).
 
+## M5: LZH (LZ77 + Huffman, DEFLATE-style)
+
+Measured 2026-10-12. Release build, gcc 13.3 `-O2`, Intel Xeon @ 2.80 GHz, one thread. Sizes include tcomp's 14-byte header; gzip's include its own (about 20 bytes plus the file name).
+
+**Canterbury corpus** (`make corpus` reproduces the ratios):
+
+| File | Size | Huffman | LZ77 | **LZH** | gzip -6 | gzip -9 | LZH vs gzip -9 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| alice29.txt | 152,089 | 87,836 | 73,169 | **55,611** | 54,435 | 54,191 | +2.6% |
+| asyoulik.txt | 125,179 | 75,948 | 67,498 | **50,323** | 48,951 | 48,829 | +3.1% |
+| cp.html | 24,603 | 16,341 | 10,894 | **8,186** | 7,999 | 7,981 | +2.6% |
+| fields.c | 11,150 | 7,168 | 4,457 | **3,182** | 3,143 | 3,136 | +1.5% |
+| grammar.lsp | 3,721 | 2,312 | 1,852 | **1,250** | 1,246 | 1,246 | +0.3% |
+| kennedy.xls | 1,029,744 | 462,674 | 345,452 | **245,229** | 206,779 | 209,733 | +16.9% |
+| lcet10.txt | 426,754 | 250,715 | 193,283 | **148,135** | 144,885 | 144,429 | +2.6% |
+| plrabn12.txt | 481,861 | 275,744 | 269,100 | **200,198** | 195,208 | 194,277 | +3.0% |
+| ptt5 | 513,216 | 106,701 | 76,464 | **57,917** | 56,443 | 52,382 | +10.6% |
+| sum | 38,240 | 25,787 | 18,388 | **13,456** | 12,924 | 12,772 | +5.4% |
+| xargs.1 | 4,227 | 2,744 | 2,600 | **1,772** | 1,756 | 1,756 | +0.9% |
+| **Total** | **2,810,784** | **1,313,970** | **1,063,157** | **785,259** | **733,769** | **730,732** | **+7.5%** |
+| **Ratio** | | 2.14× | 2.64× | **3.58×** | 3.83× | 3.85× | |
+
+gzip -1 totals 865,535 bytes (3.25×): LZH beats it by 9%.
+
+**Where the gap to gzip comes from.** LZH with a deeper search, same greedy parse:
+
+| LZH matcher | Total | Ratio |
+| --- | ---: | ---: |
+| chain 128 (default) | 785,259 | 3.579 |
+| chain 1024 | 781,217 | 3.598 |
+| unlimited | 780,751 | 3.600 |
+
+**Large files** (ratio by method):
+
+| File | Size | Huffman | LZ77 | LZH | gzip -9 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| E.coli | 4,638,690 | **4.00** | 2.20 | 3.46 | 3.57 |
+| bible.txt | 4,047,392 | 1.82 | 2.54 | **3.32** | 3.44 |
+| world192.txt | 2,473,400 | 1.59 | 2.60 | **3.31** | 3.43 |
+
+**Methods end to end** (`make bench`, all 14 files, 13,970,266 bytes, best of 5, every result verified):
+
+| Method | Compressed | Ratio | Compress MB/s | Decompress MB/s |
+| --- | ---: | ---: | ---: | ---: |
+| store | 13,970,350 | 1.000 | 1,022 | 1,046 |
+| huffman | 6,251,252 | 2.235 | 106 | 77 |
+| lz77 | 5,716,117 | 2.444 | 12.0 | 134 |
+| lzh | 4,093,672 | 3.413 | 10.7 | 108 |
+| **auto** | **3,911,661** | **3.571** | 10.4 | 99 |
+
+**Analysis**
+
+- **Combining the two stages pays off multiplicatively.** LZH is 26% smaller than LZ77 and 40% smaller than Huffman on the Canterbury corpus: LZ77 removes repeats, then Huffman shortens what is left, including the length and distance fields LZ77 spent 24 bits on.
+- **Text and source code are within 0.3–3.1% of gzip -9.** The remaining gap is not search depth: an unlimited chain gains only 0.6%. gzip also uses *lazy matching* (before taking a match, check whether the next position starts a longer one) and starts *new Huffman tables every few thousand symbols*. The second arrives with blocks in M7; the first is an M10 option.
+- **The two big gaps are files whose statistics change partway**: `kennedy.xls` (+17%, a spreadsheet mixing headers, numbers and padding) and `ptt5` (+11%, a fax image with blank and dense regions). One set of tables per file fits neither part well. This is exactly what per-block tables fix.
+- **A greedy parser can lose to plain Huffman.** On `E.coli` (DNA: 4 letters, 2 bits each with Huffman) every 3-base repeat becomes a match costing more than the 6 bits of literals it replaces. AUTO picks Huffman there, reaching 4.00× against gzip -9's 3.57×, which is why AUTO (3.57×) beats LZH alone (3.41×) on the 14 MB set.
+- **Code tables are small.** They take 62–84 bytes on text and source files and 126–136 bytes on the two binaries, where nearly every byte value occurs, against 158 bytes for plain 4-bit lengths.
+- **Speed is the matcher's.** LZH compresses at 10.7 MB/s against LZ77's 12.0; decoding a Huffman code per token costs about 20% of LZ77's decompression speed (108 vs 134 MB/s).
+
 ## M4: hash-chain matcher
 
 Measured 2026-10-08 with `make bench` on the Canterbury corpus plus the Canterbury large set (E.coli, bible.txt, world192.txt): 14 files, 13,970,266 bytes. Release build, gcc 13.3 `-O2`, Intel Xeon @ 2.80 GHz, one thread.
