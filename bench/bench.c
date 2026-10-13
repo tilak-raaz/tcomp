@@ -15,7 +15,11 @@
  *
  * Section 2, methods end to end: tcomp_compress_stream() and
  * tcomp_decompress_stream() per method through in-memory FILE streams, with
- * every result decompressed and compared byte for byte.
+ * every result decompressed and compared byte for byte. Decompression
+ * includes checking the CRC-32.
+ *
+ * Section 3, CRC-32: checksum throughput on its own, to show what the
+ * integrity check costs relative to decompression.
  *
  * --quick skips the naive matcher (about 14 s on the corpus) and uses fewer
  * repetitions.
@@ -27,6 +31,7 @@
 #include <time.h>
 
 #include "tcomp/container.h"
+#include "tcomp/crc32.h"
 #include "tcomp/lz77.h"
 
 typedef struct {
@@ -228,6 +233,24 @@ static void bench_methods(const input *inputs, int count, size_t total, int quic
     printf("\n");
 }
 
+static void bench_crc32(const input *inputs, int count, size_t total, int quick) {
+    int reps = quick ? 3 : 10;
+    double best = 1e30;
+    volatile uint32_t sink = 0; /* keeps the work from being optimised away */
+    for (int r = 0; r < reps; r++) {
+        double t = now();
+        for (int i = 0; i < count; i++) {
+            sink ^= tcomp_crc32_update(0, inputs[i].data, inputs[i].len);
+        }
+        t = now() - t;
+        best = t < best ? t : best;
+    }
+    (void)sink;
+    printf("## CRC-32 (slicing-by-8)\n\n");
+    printf("| Bytes | Time | MB/s |\n| ---: | ---: | ---: |\n");
+    printf("| %zu | %.4f s | %.0f |\n\n", total, best, total / best / 1e6);
+}
+
 int main(int argc, char **argv) {
     int quick = 0, first = 1;
     if (argc > 1 && strcmp(argv[1], "--quick") == 0) {
@@ -255,6 +278,7 @@ int main(int argc, char **argv) {
 
     bench_matchers(inputs, count, total, quick);
     bench_methods(inputs, count, total, quick);
+    bench_crc32(inputs, count, total, quick);
 
     for (int i = 0; i < count; i++) {
         free(inputs[i].data);

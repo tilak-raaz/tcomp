@@ -9,7 +9,7 @@
 #ifndef TCOMP_STATUS_H
 #define TCOMP_STATUS_H
 
-#define TCOMP_VERSION_STRING "0.5.0"
+#define TCOMP_VERSION_STRING "1.0.0"
 
 typedef enum {
     TCOMP_OK = 0,          /**< Success. Always zero so `if (st)` means "failed". */
@@ -17,10 +17,11 @@ typedef enum {
     TCOMP_ERR_NOMEM,       /**< An allocation failed. */
     TCOMP_ERR_INVALID_ARG, /**< A caller passed a NULL or out-of-range argument. */
     TCOMP_ERR_BAD_MAGIC,   /**< Input does not start with the "TCMP" magic bytes. */
-    TCOMP_ERR_BAD_VERSION, /**< Format version is newer than this build understands. */
+    TCOMP_ERR_BAD_VERSION, /**< Format version or header flags this build does not support. */
     TCOMP_ERR_BAD_METHOD,  /**< Compression method id is unknown. */
     TCOMP_ERR_TRUNCATED,   /**< Input ended before a complete structure was read. */
     TCOMP_ERR_CORRUPT,     /**< Input is structurally invalid (e.g. impossible code lengths). */
+    TCOMP_ERR_CHECKSUM,    /**< Decoded data does not match the stored CRC-32. */
     TCOMP_STATUS_COUNT     /**< Number of codes above. Not a real status. */
 } tcomp_status;
 

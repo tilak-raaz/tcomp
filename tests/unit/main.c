@@ -18,6 +18,8 @@ int main(void) {
     suite_lz77();
     printf("== lzh\n");
     suite_lzh();
+    printf("== crc32\n");
+    suite_crc32();
 
     printf("\n%d/%d tests passed\n", test_total - test_failed, test_total);
     return test_failed == 0 ? 0 : 1;

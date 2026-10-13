@@ -9,7 +9,8 @@ bench/corpus/
 *.swp
 .DS_Store
 
-# Stray outputs from manual testing
+# Stray outputs from manual testing (test fixtures are the exception)
 *.tcmp
+!tests/fixtures/**/*.tcmp
 *.restored
 core

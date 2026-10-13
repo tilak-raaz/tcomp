@@ -28,7 +28,7 @@ tcomp is built in milestones. Each one ends with working code, passing tests, up
 - [x] M3 LZ77
 - [x] M4 Hash chains + benchmarks
 - [x] M5 LZ77 + Huffman
-- [ ] M6 `.tcmp` v1 (resume-ready)
+- [x] M6 `.tcmp` v1 (resume-ready)
 - [ ] M7 Blocks + streaming
 - [ ] M8 Fuzzing
 - [ ] M9 Multithreading
