@@ -2,6 +2,52 @@
 
 Ratios are tracked from M2, speed from M3. Since M4, `make bench` reproduces the speed tables (release build, in-process, best of 5; about 4.5 minutes because of the naive matcher, or `make bench-quick` without it).
 
+## M6: format v1 and CRC-32
+
+Measured 2026-10-13. Release build, gcc 13.3 `-O2`, Intel Xeon @ 2.80 GHz (a shared 2-vCPU virtual machine), one thread.
+
+**Corruption detection.** A 3,601-byte text file (`tests/fixtures/sample.txt`) compressed with each method; then every bit of the compressed file flipped in turn, and the file cut at every length, each result decoded. "Same" means the flip still decoded to the exact original (for example a match distance changed to point at identical text), which is harmless. "Wrong" means the decoder reported success with different data.
+
+| Method | Bit flips | tcomp 0.5: rejected | same | **wrong** | tcomp 1.0: rejected | same | **wrong** |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| store | 28,856 / 28,960 | 48 | 0 | **28,808 (99.8%)** | 28,960 | 0 | **0** |
+| huffman | 19,728 / 19,768 | 3,959 | 0 | **15,769 (79.9%)** | 19,768 | 0 | **0** |
+| lz77 | 20,800 / 20,840 | 7,381 | 10 | **13,409 (64.5%)** | 20,830 | 10 | **0** |
+| lzh | 14,416 / 14,456 | 7,476 | 7 | **6,933 (48.1%)** | 14,449 | 7 | **0** |
+
+(Flip counts differ by 40 because each v1 file is 5 bytes longer.) Truncations: tcomp 0.5 accepted 3,601 of 3,607 cut STORE files, writing a shorter file with exit code 0. tcomp 1.0 rejects every truncation of every method. Even the compressed methods, which do have structure, decoded half or more of all flips to wrong output without a checksum: a Huffman bitstream is dense, so most flips just turn one valid code into another. `make test` repeats this check (on a smaller file) for every method on every run.
+
+**CRC-32 speed** (64 MB buffer):
+
+| Implementation | MB/s |
+| --- | ---: |
+| bit at a time (the definition) | 97 |
+| one 256-entry table, a byte at a time | 387 |
+| **slicing-by-8** (tcomp) | **2,105** |
+
+`make bench` reports the slicing-by-8 figure on the corpus as well (about 2,000 MB/s).
+
+**What the checksum costs.** Instruction counts (callgrind, decompressing `bible.txt`): the CRC is **4.0%** of all instructions for LZH and **2.1%** for HUFFMAN. A cache simulation (cachegrind, 32 KB L1) shows it missing L1 once per 64-byte line of data, which is the minimum for reading the data once.
+
+Wall-clock, tcomp 0.5 against 1.0 on the 14 files (13,970,266 bytes), best of 4 interleaved `make bench-quick` runs:
+
+| Method | Compressed (1.0) | Compress MB/s, 0.5 → 1.0 | Decompress MB/s, 0.5 → 1.0 |
+| --- | ---: | ---: | ---: |
+| store | 13,970,532 | 1,214 → 395 | 1,307 → 452 |
+| huffman | 6,251,322 | 111 → 92 | 82 → 62 |
+| lz77 | 5,716,187 | 12.7 → 11.5 | 140 → 121 |
+| lzh | 4,093,742 | 11.0 → 10.3 | 114 → 102 |
+| **auto** | **3,911,731** | 10.4 → 10.0 | 99 → 85 |
+
+Ratios are unchanged (each file is 5 bytes larger: 3.58× on Canterbury, 785,314 bytes, and 3.571× on the 14 files).
+
+**Analysis**
+
+- **The integrity check costs about 4–5% of decompression work**, which matches its standalone speed: about 0.5 ns per byte, against 9–16 ns per byte to decode.
+- **The wall-clock slowdown is larger than that and is not fully explained.** A build of 1.0 with the CRC removed decompresses as fast as 0.5, so the slowdown does come with the CRC. But it appears only when output is written: decompressing to a discarding sink (`tcomp verify`), the CRC made no measurable difference. Checksumming in 16 KB slices, so each slice is still in L1 when it is written, did not help either. The test machine is a shared virtual machine whose timings vary 10% between runs; this should be re-measured on dedicated hardware with hardware performance counters before optimising.
+- **STORE is the one real regression**: compression now reads the whole input before writing (the header needs its size), and at ~1 GB/s a 2 GB/s CRC is no longer negligible. It is still faster than any other method by 4×. M7's blocks restore streaming.
+- **A faster CRC exists** (carry-less multiplication, PCLMULQDQ on x86 or PMULL on ARM, at 10+ GB/s) but needs CPU-specific code. At 4% of decompression it is not worth it yet.
+
 ## M5: LZH (LZ77 + Huffman, DEFLATE-style)
 
 Measured 2026-10-12. Release build, gcc 13.3 `-O2`, Intel Xeon @ 2.80 GHz, one thread. Sizes include tcomp's 14-byte header; gzip's include its own (about 20 bytes plus the file name).
@@ -107,8 +153,6 @@ Measured 2026-10-08 with `make bench` on the Canterbury corpus plus the Canterbu
 - **The limit trades ratio for speed, unevenly.** On ordinary text, 128 candidates come within 0.5% of unlimited. Two files keep gaining: `E.coli` (4-letter alphabet, so only 64 distinct 3-byte strings and enormous chains of short matches) and `ptt5` (long zero runs, where every position hashes alike). The default, 128, is zlib's level-6 value: 205× faster than naive, 6% behind unlimited overall and 1% on the 2.8 MB Canterbury set.
 - **AUTO is now better than any single method** (2.93×): it picks Huffman for `E.coli` (2 bits per base beat LZ77's 9-bit literals) and LZ77 for text. Combining both in one stream (M5) should beat it again.
 - **Decompression is 12× faster than compression** for LZ77: the decoder only copies bytes, all the searching happens once, at compression time.
-
-## M3: LZ77 with fixed-width tokens
 
 ## M3: LZ77 with fixed-width tokens
 

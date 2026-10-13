@@ -13,13 +13,15 @@ const char *tcomp_strerror(tcomp_status status) {
     case TCOMP_ERR_BAD_MAGIC:
         return "not a tcomp file (bad magic bytes)";
     case TCOMP_ERR_BAD_VERSION:
-        return "unsupported format version";
+        return "unsupported format version or flags";
     case TCOMP_ERR_BAD_METHOD:
         return "unknown compression method";
     case TCOMP_ERR_TRUNCATED:
         return "file is truncated";
     case TCOMP_ERR_CORRUPT:
         return "file is corrupt";
+    case TCOMP_ERR_CHECKSUM:
+        return "checksum mismatch: file is corrupt";
     case TCOMP_STATUS_COUNT:
         break;
     }

@@ -5,28 +5,29 @@
 #include <string.h>
 
 #include "tcomp/bitio.h"
+#include "tcomp/crc32.h"
 #include "tcomp/huffman.h"
 #include "tcomp/lz77.h"
 #include "tcomp/lzh.h"
 
-/* Layout (docs/FORMAT.md, version 0):
- *   header   magic "TCMP" (4) | format version (1) | method id (1)
- *   STORE    raw bytes to end of file
- *   HUFFMAN  original size, uint64 little-endian (8)
- *            bitstream: 256 x 4-bit code lengths, then one code per byte,
- *            then 0-7 zero bits of padding
- *   LZ77     original size, uint64 little-endian (8)
- *            bitstream: tokens (9-bit literals, 24-bit matches), then
- *            0-7 zero bits of padding
- *   LZH      original size, uint64 little-endian (8)
- *            bitstream: code tables, Huffman-coded tokens (src/lzh.c), then
- *            0-7 zero bits of padding
+/* Layout (docs/FORMAT.md, version 1):
+ *   header   magic "TCMP" (4) | format version 1 (1) | method id (1) |
+ *            flags, must be 0 (1) | original size n, uint64 LE (8)    15 bytes
+ *   payload  STORE    the n original bytes
+ *            HUFFMAN  256 x 4-bit code lengths, then one code per byte
+ *            LZ77     tokens (9-bit literals, 24-bit matches)
+ *            LZH      code tables, Huffman-coded tokens (src/lzh.c)
+ *            Bitstream payloads end with 0-7 zero bits of padding.
+ *   trailer  CRC-32 of the n original bytes, uint32 LE (4)
  */
 enum {
-    HEADER_SIZE = 6,
-    FORMAT_VERSION = 0,
+    PREFIX_SIZE = 6, /* magic, version, method: enough to identify the file */
+    HEADER_SIZE = 15,
+    TRAILER_SIZE = 4,
+    FORMAT_VERSION = 1,
+    FLAGS_OFFSET = 6,
+    SIZE_OFFSET = 7,
     COPY_CHUNK = 64 * 1024,
-    SIZE_FIELD = 8,
     BYTE_SYMBOLS = 256,
     LENGTH_BITS = 4,
     LZ_LITERAL_BITS = 1 + 8,
@@ -35,45 +36,40 @@ enum {
     LZ_MATCH_BITS = 1 + LZ_LENGTH_BITS + LZ_DISTANCE_BITS
 };
 
+_Static_assert(HEADER_SIZE + TRAILER_SIZE == TCOMP_FILE_OVERHEAD, "overhead out of date");
+
 static const uint8_t MAGIC[4] = {'T', 'C', 'M', 'P'};
 
-/* ---- small I/O helpers -------------------------------------------------- */
-
-/* Copy in -> out until EOF. Buffers are allocated per call, never static,
- * so the library stays safe to call from several threads (M9). */
-static tcomp_status copy_stream(FILE *in, FILE *out) {
-    uint8_t *buf = malloc(COPY_CHUNK);
-    if (buf == NULL) {
-        return TCOMP_ERR_NOMEM;
+const char *tcomp_method_name(tcomp_method method) {
+    switch (method) {
+    case TCOMP_METHOD_STORE:
+        return "store";
+    case TCOMP_METHOD_HUFFMAN:
+        return "huffman";
+    case TCOMP_METHOD_LZ77:
+        return "lz77";
+    case TCOMP_METHOD_LZH:
+        return "lzh";
+    case TCOMP_METHOD_AUTO:
+        return "auto";
     }
-    tcomp_status st = TCOMP_OK;
-    size_t n;
-    while (st == TCOMP_OK && (n = fread(buf, 1, COPY_CHUNK, in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            st = TCOMP_ERR_IO;
-        }
-    }
-    if (st == TCOMP_OK && ferror(in)) {
-        st = TCOMP_ERR_IO;
-    }
-    free(buf);
-    return st;
+    return "unknown";
 }
+
+static int is_file_method(unsigned id) {
+    return id == TCOMP_METHOD_STORE || id == TCOMP_METHOD_HUFFMAN || id == TCOMP_METHOD_LZ77 ||
+           id == TCOMP_METHOD_LZH;
+}
+
+/* ---- small I/O helpers -------------------------------------------------- */
 
 static tcomp_status write_all(FILE *out, const void *data, size_t len) {
     return (len == 0 || fwrite(data, 1, len, out) == len) ? TCOMP_OK : TCOMP_ERR_IO;
 }
 
-static tcomp_status write_header(FILE *out, tcomp_method method) {
-    uint8_t header[HEADER_SIZE];
-    memcpy(header, MAGIC, sizeof MAGIC);
-    header[4] = FORMAT_VERSION;
-    header[5] = (uint8_t)method;
-    return write_all(out, header, sizeof header);
-}
-
-/* Read everything left in `in` into a new buffer. On success the caller
- * frees *data (which may be NULL only if *len is 0). */
+/* Read everything left in `in` into a new buffer. Buffers are allocated per
+ * call, never static, so the library stays safe to call from several
+ * threads (M9). On success the caller frees *data. */
 static tcomp_status read_all(FILE *in, uint8_t **data, size_t *len) {
     size_t cap = COPY_CHUNK, n = 0;
     uint8_t *buf = malloc(cap);
@@ -110,34 +106,30 @@ static tcomp_status read_all(FILE *in, uint8_t **data, size_t *len) {
     return TCOMP_OK;
 }
 
-static void store_le64(uint8_t *p, uint64_t v) {
-    for (int i = 0; i < 8; i++) {
+static void store_le(uint8_t *p, uint64_t v, int nbytes) {
+    for (int i = 0; i < nbytes; i++) {
         p[i] = (uint8_t)(v >> (8 * i));
     }
 }
 
-static uint64_t load_le64(const uint8_t *p) {
+static uint64_t load_le(const uint8_t *p, int nbytes) {
     uint64_t v = 0;
-    for (int i = 7; i >= 0; i--) {
+    for (int i = nbytes - 1; i >= 0; i--) {
         v = (v << 8) | p[i];
     }
     return v;
 }
 
-/* Header, 8-byte original size, then the bitstream: the layout shared by
- * every method except STORE. */
-static tcomp_status write_sized_payload(FILE *out, tcomp_method method, uint64_t size,
-                                        const tcomp_bitwriter *bw) {
-    uint8_t size_field[SIZE_FIELD];
-    store_le64(size_field, size);
-    tcomp_status st = write_header(out, method);
-    if (st == TCOMP_OK) {
-        st = write_all(out, size_field, sizeof size_field);
-    }
-    if (st == TCOMP_OK) {
-        st = write_all(out, tcomp_bw_data(bw), tcomp_bw_size(bw));
-    }
-    return st;
+/* Decoded bytes go through a sink, which keeps a running CRC-32 of
+ * everything written. out == NULL discards the bytes (tcomp verify). */
+typedef struct {
+    FILE *out;
+    uint32_t crc;
+} sink;
+
+static tcomp_status sink_write(sink *s, const uint8_t *data, size_t len) {
+    s->crc = tcomp_crc32_update(s->crc, data, len);
+    return s->out == NULL ? TCOMP_OK : write_all(s->out, data, len);
 }
 
 /* After the last symbol only zero padding (under one byte) may remain.
@@ -176,23 +168,15 @@ static tcomp_status plan_huffman(const uint8_t *data, size_t len, huffman_plan *
     return st;
 }
 
-static tcomp_status write_huffman(const uint8_t *data, size_t len, const huffman_plan *plan,
-                                  FILE *out) {
-    tcomp_bitwriter bw;
-    tcomp_status st = tcomp_bw_init(&bw, (size_t)((plan->bits + 7) / 8));
+static tcomp_status encode_huffman(const uint8_t *data, size_t len, const huffman_plan *plan,
+                                   tcomp_bitwriter *bw) {
+    tcomp_status st = TCOMP_OK;
     for (size_t s = 0; s < BYTE_SYMBOLS && st == TCOMP_OK; s++) {
-        st = tcomp_bw_write_bits(&bw, plan->lengths[s], LENGTH_BITS);
+        st = tcomp_bw_write_bits(bw, plan->lengths[s], LENGTH_BITS);
     }
     for (size_t i = 0; i < len && st == TCOMP_OK; i++) {
-        st = tcomp_bw_write_bits(&bw, plan->codes[data[i]], plan->lengths[data[i]]);
+        st = tcomp_bw_write_bits(bw, plan->codes[data[i]], plan->lengths[data[i]]);
     }
-    if (st == TCOMP_OK) {
-        st = tcomp_bw_flush(&bw);
-    }
-    if (st == TCOMP_OK) {
-        st = write_sized_payload(out, TCOMP_METHOD_HUFFMAN, len, &bw);
-    }
-    tcomp_bw_free(&bw);
     return st;
 }
 
@@ -207,52 +191,49 @@ static uint64_t lz77_bits(const tcomp_lz77_tokens *tokens) {
 /* LZ77 tokens as fixed-width fields:
  *   literal  0 + byte                                (9 bits)
  *   match    1 + (length - 3) + (distance - 1)       (1 + 8 + 15 = 24 bits) */
-static tcomp_status write_lz77(const tcomp_lz77_tokens *tokens, size_t len, FILE *out) {
-    tcomp_bitwriter bw;
-    tcomp_status st = tcomp_bw_init(&bw, (size_t)((lz77_bits(tokens) + 7) / 8) + 1);
+static tcomp_status encode_lz77(const tcomp_lz77_tokens *tokens, tcomp_bitwriter *bw) {
+    tcomp_status st = TCOMP_OK;
     for (size_t t = 0; t < tokens->count && st == TCOMP_OK; t++) {
         const tcomp_lz77_token *tok = &tokens->items[t];
         if (tok->distance == 0) {
-            st = tcomp_bw_write_bits(&bw, tok->length, LZ_LITERAL_BITS);
+            st = tcomp_bw_write_bits(bw, tok->length, LZ_LITERAL_BITS);
         } else {
             uint32_t field = 1u << (LZ_LENGTH_BITS + LZ_DISTANCE_BITS) |
                              (uint32_t)(tok->length - TCOMP_LZ77_MIN_MATCH) << LZ_DISTANCE_BITS |
                              (uint32_t)(tok->distance - 1);
-            st = tcomp_bw_write_bits(&bw, field, LZ_MATCH_BITS);
+            st = tcomp_bw_write_bits(bw, field, LZ_MATCH_BITS);
         }
     }
-    if (st == TCOMP_OK) {
-        st = tcomp_bw_flush(&bw);
-    }
-    if (st == TCOMP_OK) {
-        st = write_sized_payload(out, TCOMP_METHOD_LZ77, len, &bw);
-    }
-    tcomp_bw_free(&bw);
     return st;
 }
 
-static tcomp_status write_lzh(const tcomp_lzh_encoder *enc, const tcomp_lz77_tokens *tokens,
-                              size_t len, FILE *out) {
-    tcomp_bitwriter bw;
-    tcomp_status st = tcomp_bw_init(&bw, (size_t)((enc->bits + 7) / 8) + 1);
+/* Header, payload, trailer: the whole file. */
+static tcomp_status write_file(FILE *out, tcomp_method method, uint64_t size,
+                               const uint8_t *payload, size_t payload_len, uint32_t crc) {
+    uint8_t header[HEADER_SIZE], trailer[TRAILER_SIZE];
+    memcpy(header, MAGIC, sizeof MAGIC);
+    header[4] = FORMAT_VERSION;
+    header[5] = (uint8_t)method;
+    header[FLAGS_OFFSET] = 0;
+    store_le(header + SIZE_OFFSET, size, 8);
+    store_le(trailer, crc, TRAILER_SIZE);
+
+    tcomp_status st = write_all(out, header, sizeof header);
     if (st == TCOMP_OK) {
-        st = tcomp_lzh_write(enc, tokens->items, tokens->count, &bw);
+        st = write_all(out, payload, payload_len);
     }
     if (st == TCOMP_OK) {
-        st = tcomp_bw_flush(&bw);
+        st = write_all(out, trailer, sizeof trailer);
     }
-    if (st == TCOMP_OK) {
-        st = write_sized_payload(out, TCOMP_METHOD_LZH, len, &bw);
-    }
-    tcomp_bw_free(&bw);
     return st;
 }
 
 /* Run the requested method, or for AUTO every method, and write the result.
  * Payload sizes are computed exactly before anything is written, so AUTO
  * never encodes twice: it plans HUFFMAN, parses LZ77 once (LZ77 and LZH
- * share the tokens), plans LZH, then writes the smallest, preferring the
- * simpler method on ties. */
+ * share the tokens), plans LZH, then encodes only the smallest, preferring
+ * the simpler method on ties. Header and trailer cost the same for every
+ * method, so comparing payloads is enough. */
 static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_method method,
                                     FILE *out) {
     huffman_plan plan;
@@ -265,7 +246,7 @@ static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_metho
 
     if (method == TCOMP_METHOD_HUFFMAN || method == TCOMP_METHOD_AUTO) {
         st = plan_huffman(data, len, &plan);
-        uint64_t size = SIZE_FIELD + (plan.bits + 7) / 8;
+        uint64_t size = (plan.bits + 7) / 8;
         if (st == TCOMP_OK && (method == TCOMP_METHOD_HUFFMAN || size < best)) {
             best = size;
             chosen = TCOMP_METHOD_HUFFMAN;
@@ -277,7 +258,7 @@ static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_metho
         st = tcomp_lz77_parse(data, len, TCOMP_LZ77_WINDOW, TCOMP_LZ77_DEFAULT_CHAIN, &tokens);
     }
     if (st == TCOMP_OK && wants_lz77) {
-        uint64_t size = SIZE_FIELD + (lz77_bits(&tokens) + 7) / 8;
+        uint64_t size = (lz77_bits(&tokens) + 7) / 8;
         if (method == TCOMP_METHOD_LZ77 || size < best) {
             best = size;
             chosen = TCOMP_METHOD_LZ77;
@@ -285,31 +266,44 @@ static tcomp_status compress_memory(const uint8_t *data, size_t len, tcomp_metho
     }
     if (st == TCOMP_OK && wants_lzh) {
         st = tcomp_lzh_plan(tokens.items, tokens.count, &lzh);
-        uint64_t size = SIZE_FIELD + (lzh.bits + 7) / 8;
+        uint64_t size = (lzh.bits + 7) / 8;
         if (st == TCOMP_OK && (method == TCOMP_METHOD_LZH || size < best)) {
             best = size;
             chosen = TCOMP_METHOD_LZH;
         }
     }
 
+    tcomp_bitwriter bw;
+    int have_bw = 0;
+    if (st == TCOMP_OK && chosen != TCOMP_METHOD_STORE) {
+        st = tcomp_bw_init(&bw, (size_t)best + 1);
+        have_bw = st == TCOMP_OK;
+    }
     if (st == TCOMP_OK) {
         switch (chosen) {
         case TCOMP_METHOD_HUFFMAN:
-            st = write_huffman(data, len, &plan, out);
+            st = encode_huffman(data, len, &plan, &bw);
             break;
         case TCOMP_METHOD_LZ77:
-            st = write_lz77(&tokens, len, out);
+            st = encode_lz77(&tokens, &bw);
             break;
         case TCOMP_METHOD_LZH:
-            st = write_lzh(&lzh, &tokens, len, out);
+            st = tcomp_lzh_write(&lzh, tokens.items, tokens.count, &bw);
             break;
         default:
-            st = write_header(out, TCOMP_METHOD_STORE);
-            if (st == TCOMP_OK) {
-                st = write_all(out, data, len);
-            }
             break;
         }
+    }
+    if (st == TCOMP_OK && have_bw) {
+        st = tcomp_bw_flush(&bw);
+    }
+    if (st == TCOMP_OK) {
+        uint32_t crc = tcomp_crc32_update(0, data, len);
+        st = have_bw ? write_file(out, chosen, len, tcomp_bw_data(&bw), tcomp_bw_size(&bw), crc)
+                     : write_file(out, chosen, len, data, len, crc);
+    }
+    if (have_bw) {
+        tcomp_bw_free(&bw);
     }
     tcomp_lz77_tokens_free(&tokens);
     return st;
@@ -319,12 +313,7 @@ tcomp_status tcomp_compress_stream(FILE *in, FILE *out, tcomp_method method) {
     if (in == NULL || out == NULL) {
         return TCOMP_ERR_INVALID_ARG;
     }
-    if (method == TCOMP_METHOD_STORE) {
-        tcomp_status st = write_header(out, TCOMP_METHOD_STORE);
-        return st != TCOMP_OK ? st : copy_stream(in, out);
-    }
-    if (method != TCOMP_METHOD_HUFFMAN && method != TCOMP_METHOD_LZ77 &&
-        method != TCOMP_METHOD_LZH && method != TCOMP_METHOD_AUTO) {
+    if (!is_file_method((unsigned)method) && method != TCOMP_METHOD_AUTO) {
         return TCOMP_ERR_INVALID_ARG;
     }
 
@@ -338,10 +327,10 @@ tcomp_status tcomp_compress_stream(FILE *in, FILE *out, tcomp_method method) {
     return st;
 }
 
-/* ---- decompression ------------------------------------------------------ */
+/* ---- decompression: payload decoders ------------------------------------ */
 
 static tcomp_status decode_huffman_payload(const uint8_t *payload, size_t len, uint64_t size,
-                                           FILE *out) {
+                                           sink *out) {
     tcomp_bitreader br;
     tcomp_status st = tcomp_br_init(&br, payload, len);
     if (st != TCOMP_OK) {
@@ -383,7 +372,7 @@ static tcomp_status decode_huffman_payload(const uint8_t *payload, size_t len, u
         if (st == TCOMP_OK) {
             buf[used++] = (uint8_t)sym;
             if (used == COPY_CHUNK) {
-                st = write_all(out, buf, used);
+                st = sink_write(out, buf, used);
                 used = 0;
             }
         }
@@ -394,7 +383,7 @@ static tcomp_status decode_huffman_payload(const uint8_t *payload, size_t len, u
         st = check_padding(&br);
     }
     if (st == TCOMP_OK) {
-        st = write_all(out, buf, used);
+        st = sink_write(out, buf, used);
     }
     free(buf);
     return st;
@@ -432,8 +421,8 @@ static tcomp_status read_lzh_token(void *ctx, tcomp_bitreader *br, tcomp_lz77_to
     return tcomp_lzh_read_token((const tcomp_lzh_decoder *)ctx, br, token);
 }
 
-/* Expand tokens from `br` straight to `out`, keeping only the last 32 KB of
- * output in memory: memory use is constant no matter what `size` claims.
+/* Expand tokens from `br` into `out`, keeping only the last 32 KB of output
+ * in memory: memory use is constant no matter what `size` claims.
  * Shared by every LZ77-based method; only the token reader differs.
  *
  * buf holds [already written | not yet written]; when a token would not
@@ -443,7 +432,7 @@ static tcomp_status read_lzh_token(void *ctx, tcomp_bitreader *br, tcomp_lz77_to
  * min_token_bits is the smallest possible token, used to reject a size
  * field no bitstream of this length could satisfy before doing any work. */
 static tcomp_status expand_tokens(tcomp_bitreader *br, uint64_t size, unsigned min_token_bits,
-                                  token_reader read_token, void *ctx, FILE *out) {
+                                  token_reader read_token, void *ctx, sink *out) {
     if (size > (uint64_t)(tcomp_br_bits_remaining(br) / min_token_bits) * TCOMP_LZ77_MAX_MATCH) {
         return TCOMP_ERR_TRUNCATED;
     }
@@ -468,7 +457,7 @@ static tcomp_status expand_tokens(tcomp_bitreader *br, uint64_t size, unsigned m
             break;
         }
         if (pos + length > BUF) {
-            st = write_all(out, buf + flushed, pos - flushed);
+            st = sink_write(out, buf + flushed, pos - flushed);
             memmove(buf, buf + pos - TCOMP_LZ77_WINDOW, TCOMP_LZ77_WINDOW);
             pos = flushed = TCOMP_LZ77_WINDOW;
         }
@@ -486,14 +475,14 @@ static tcomp_status expand_tokens(tcomp_bitreader *br, uint64_t size, unsigned m
         st = check_padding(br);
     }
     if (st == TCOMP_OK) {
-        st = write_all(out, buf + flushed, pos - flushed);
+        st = sink_write(out, buf + flushed, pos - flushed);
     }
     free(buf);
     return st;
 }
 
 static tcomp_status decode_lz77_payload(const uint8_t *payload, size_t len, uint64_t size,
-                                        FILE *out) {
+                                        sink *out) {
     tcomp_bitreader br;
     tcomp_status st = tcomp_br_init(&br, payload, len);
     if (st != TCOMP_OK) {
@@ -503,7 +492,7 @@ static tcomp_status decode_lz77_payload(const uint8_t *payload, size_t len, uint
 }
 
 static tcomp_status decode_lzh_payload(const uint8_t *payload, size_t len, uint64_t size,
-                                       FILE *out) {
+                                       sink *out) {
     tcomp_bitreader br;
     tcomp_status st = tcomp_br_init(&br, payload, len);
     if (st != TCOMP_OK) {
@@ -519,27 +508,129 @@ static tcomp_status decode_lzh_payload(const uint8_t *payload, size_t len, uint6
     return st;
 }
 
-typedef tcomp_status (*payload_decoder)(const uint8_t *payload, size_t len, uint64_t size,
-                                        FILE *out);
+/* ---- decompression: header, framing, checksum --------------------------- */
 
-/* Read the 8-byte size field and the rest of the file, then decode. */
-static tcomp_status decompress_sized(FILE *in, FILE *out, payload_decoder decode) {
-    uint8_t size_field[SIZE_FIELD];
-    size_t got = fread(size_field, 1, sizeof size_field, in);
+typedef struct {
+    tcomp_method method;
+    uint64_t size;
+} file_header;
+
+/* Read and validate the 15-byte header, in the order FORMAT.md specifies. */
+static tcomp_status read_header(FILE *in, file_header *h) {
+    uint8_t buf[HEADER_SIZE];
+    size_t got = fread(buf, 1, sizeof buf, in);
     if (ferror(in)) {
         return TCOMP_ERR_IO;
     }
-    if (got < sizeof size_field) {
+    /* Check the magic on whatever we did read first: a 2-byte file that
+     * starts "XY" is "not a tcomp file", not "truncated". */
+    size_t magic_got = got < sizeof MAGIC ? got : sizeof MAGIC;
+    if (memcmp(buf, MAGIC, magic_got) != 0) {
+        return TCOMP_ERR_BAD_MAGIC;
+    }
+    if (got < PREFIX_SIZE) {
         return TCOMP_ERR_TRUNCATED;
     }
-
-    uint8_t *payload = NULL;
-    size_t len = 0;
-    tcomp_status st = read_all(in, &payload, &len);
-    if (st == TCOMP_OK) {
-        st = decode(payload, len, load_le64(size_field), out);
+    /* Exactly 1: version 0 had no checksum, so accepting it would let a
+     * one-bit change to this byte pass damaged data off as valid. */
+    if (buf[4] != FORMAT_VERSION) {
+        return TCOMP_ERR_BAD_VERSION;
     }
-    free(payload);
+    if (!is_file_method(buf[5])) {
+        return TCOMP_ERR_BAD_METHOD;
+    }
+    if (got < HEADER_SIZE) {
+        return TCOMP_ERR_TRUNCATED;
+    }
+    if (buf[FLAGS_OFFSET] != 0) {
+        return TCOMP_ERR_BAD_VERSION; /* a feature this build does not know */
+    }
+    h->method = (tcomp_method)buf[5];
+    h->size = load_le(buf + SIZE_OFFSET, 8);
+    return TCOMP_OK;
+}
+
+/* STORE: copy exactly `size` bytes, then read the trailer, which must be
+ * the last thing in the file. Streams with constant memory. */
+static tcomp_status decode_store(FILE *in, uint64_t size, sink *out, uint32_t *stored_crc) {
+    uint8_t *buf = malloc(COPY_CHUNK);
+    if (buf == NULL) {
+        return TCOMP_ERR_NOMEM;
+    }
+    tcomp_status st = TCOMP_OK;
+    while (size > 0 && st == TCOMP_OK) {
+        size_t want = size < COPY_CHUNK ? (size_t)size : COPY_CHUNK;
+        size_t got = fread(buf, 1, want, in);
+        st = sink_write(out, buf, got);
+        size -= got;
+        if (st == TCOMP_OK && got < want) {
+            st = ferror(in) ? TCOMP_ERR_IO : TCOMP_ERR_TRUNCATED;
+        }
+    }
+    if (st == TCOMP_OK) {
+        uint8_t trailer[TRAILER_SIZE];
+        size_t got = fread(trailer, 1, sizeof trailer, in);
+        if (ferror(in)) {
+            st = TCOMP_ERR_IO;
+        } else if (got < sizeof trailer) {
+            st = TCOMP_ERR_TRUNCATED;
+        } else if (fgetc(in) != EOF) {
+            st = TCOMP_ERR_CORRUPT; /* data after the trailer */
+        } else {
+            *stored_crc = (uint32_t)load_le(trailer, TRAILER_SIZE);
+        }
+    }
+    free(buf);
+    return st;
+}
+
+/* Other methods: read the rest of the file; the last 4 bytes are the
+ * trailer and everything before them is the bitstream. */
+static tcomp_status decode_bitstream(FILE *in, const file_header *h, sink *out,
+                                     uint32_t *stored_crc) {
+    uint8_t *rest = NULL;
+    size_t len = 0;
+    tcomp_status st = read_all(in, &rest, &len);
+    if (st != TCOMP_OK) {
+        return st;
+    }
+    if (len < TRAILER_SIZE) {
+        free(rest);
+        return TCOMP_ERR_TRUNCATED;
+    }
+    len -= TRAILER_SIZE;
+    *stored_crc = (uint32_t)load_le(rest + len, TRAILER_SIZE);
+    switch (h->method) {
+    case TCOMP_METHOD_HUFFMAN:
+        st = decode_huffman_payload(rest, len, h->size, out);
+        break;
+    case TCOMP_METHOD_LZ77:
+        st = decode_lz77_payload(rest, len, h->size, out);
+        break;
+    default:
+        st = decode_lzh_payload(rest, len, h->size, out);
+        break;
+    }
+    free(rest);
+    return st;
+}
+
+/* Decode the whole file into `out` (NULL: discard), then compare CRCs.
+ * Structural errors are reported first; a checksum mismatch means the
+ * file decoded cleanly but to different data than was compressed. */
+static tcomp_status decompress_to(FILE *in, FILE *out) {
+    file_header h;
+    tcomp_status st = read_header(in, &h);
+    if (st != TCOMP_OK) {
+        return st;
+    }
+    sink s = {out, 0};
+    uint32_t stored_crc = 0;
+    st = h.method == TCOMP_METHOD_STORE ? decode_store(in, h.size, &s, &stored_crc)
+                                        : decode_bitstream(in, &h, &s, &stored_crc);
+    if (st == TCOMP_OK && s.crc != stored_crc) {
+        st = TCOMP_ERR_CHECKSUM;
+    }
     return st;
 }
 
@@ -547,34 +638,56 @@ tcomp_status tcomp_decompress_stream(FILE *in, FILE *out) {
     if (in == NULL || out == NULL) {
         return TCOMP_ERR_INVALID_ARG;
     }
-    uint8_t header[HEADER_SIZE];
-    size_t got = fread(header, 1, sizeof header, in);
+    return decompress_to(in, out);
+}
+
+tcomp_status tcomp_verify_stream(FILE *in) {
+    if (in == NULL) {
+        return TCOMP_ERR_INVALID_ARG;
+    }
+    return decompress_to(in, NULL);
+}
+
+tcomp_status tcomp_read_info(FILE *in, tcomp_info *info) {
+    if (in == NULL || info == NULL) {
+        return TCOMP_ERR_INVALID_ARG;
+    }
+    file_header h;
+    tcomp_status st = read_header(in, &h);
+    if (st != TCOMP_OK) {
+        return st;
+    }
+    uint8_t *buf = malloc(COPY_CHUNK);
+    if (buf == NULL) {
+        return TCOMP_ERR_NOMEM;
+    }
+    /* Count the rest of the file, remembering its last 4 bytes. */
+    uint8_t tail[TRAILER_SIZE] = {0};
+    uint64_t rest = 0;
+    size_t n;
+    while ((n = fread(buf, 1, COPY_CHUNK, in)) > 0) {
+        if (n >= TRAILER_SIZE) {
+            memcpy(tail, buf + n - TRAILER_SIZE, TRAILER_SIZE);
+        } else {
+            memmove(tail, tail + n, TRAILER_SIZE - n);
+            memcpy(tail + TRAILER_SIZE - n, buf, n);
+        }
+        rest += n;
+    }
+    free(buf);
     if (ferror(in)) {
         return TCOMP_ERR_IO;
     }
-
-    /* Check the magic on whatever we did read first: a 2-byte file that
-     * starts "XY" is "not a tcomp file", not "truncated". */
-    size_t magic_got = got < sizeof MAGIC ? got : sizeof MAGIC;
-    if (memcmp(header, MAGIC, magic_got) != 0) {
-        return TCOMP_ERR_BAD_MAGIC;
-    }
-    if (got < sizeof header) {
+    if (rest < TRAILER_SIZE || (h.method == TCOMP_METHOD_STORE && rest - TRAILER_SIZE < h.size)) {
         return TCOMP_ERR_TRUNCATED;
     }
-    if (header[4] > FORMAT_VERSION) {
-        return TCOMP_ERR_BAD_VERSION;
+    if (h.method == TCOMP_METHOD_STORE && rest - TRAILER_SIZE > h.size) {
+        return TCOMP_ERR_CORRUPT;
     }
-    switch (header[5]) {
-    case TCOMP_METHOD_STORE:
-        return copy_stream(in, out);
-    case TCOMP_METHOD_HUFFMAN:
-        return decompress_sized(in, out, decode_huffman_payload);
-    case TCOMP_METHOD_LZ77:
-        return decompress_sized(in, out, decode_lz77_payload);
-    case TCOMP_METHOD_LZH:
-        return decompress_sized(in, out, decode_lzh_payload);
-    default:
-        return TCOMP_ERR_BAD_METHOD;
-    }
+    info->version = FORMAT_VERSION;
+    info->method = h.method;
+    info->original_size = h.size;
+    info->compressed_size = HEADER_SIZE + rest;
+    info->crc32 = (uint32_t)load_le(tail, TRAILER_SIZE);
+    return TCOMP_OK;
 }
